@@ -23,6 +23,7 @@ from ..db import (
     create_user_agent,
     get_user_agents,
     update_user_agent,
+    delete_user_agent,
     trigger_webhook_agent,
     get_user_agent_instances,
 )
@@ -69,6 +70,19 @@ async def update_existing_user_agent(
     return agent
 
 
+@router.delete("/user-agents/{agent_id}")
+async def delete_existing_user_agent(
+    agent_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete an existing user agent and all its instances"""
+    success = delete_user_agent(db, agent_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="User agent not found")
+    return {"message": "User agent and all associated instances deleted successfully"}
+
+
 @router.get(
     "/user-agents/{agent_id}/instances", response_model=list[AgentInstanceResponse]
 )
@@ -107,7 +121,12 @@ async def create_agent_instance(
     if user_agent.webhook_url:
         # Trigger the webhook
         result = await trigger_webhook_agent(
-            db, user_agent, current_user.id, request.prompt
+            db,
+            user_agent,
+            current_user.id,
+            request.prompt,
+            request.name,
+            request.worktree_name,
         )
         return result
     else:

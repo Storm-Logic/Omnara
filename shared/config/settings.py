@@ -65,7 +65,7 @@ class Settings(BaseSettings):
         return "postgresql://user:password@localhost:5432/agent_dashboard"
 
     # Frontend URLs - expects JSON array in env var
-    frontend_urls: List[str] = ["http://localhost:3000"]
+    frontend_urls: List[str] = ["https://omnara.com", "http://localhost:3000"]
 
     # API Versioning
     api_v1_prefix: str = "/api/v1"
@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     pro_plan_price: float = 9
     enterprise_plan_agent_limit: int = -1  # Unlimited
     enterprise_plan_price: float = 500
+
+    # Twilio Configuration
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_phone_number: str = ""  # Format: +1234567890
+    twilio_sendgrid_api_key: str = ""  # For email notifications via SendGrid
+    twilio_from_email: str = ""  # Sender email address
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
