@@ -82,12 +82,25 @@ class MessageProcessor:
         # Track if this message uses tools
         self.last_was_tool_use = bool(tools_used)
 
+        # Sanitize content - remove NUL characters and control characters that break the API
+        # This handles binary content from .docx, PDFs, etc.
+        sanitized_content = "".join(
+            char if ord(char) >= 32 or char in "\n\r\t" else ""
+            for char in content.replace("\x00", "")
+        )
+
         # Get git diff if enabled
         git_diff = self.wrapper.get_git_diff()
+        # Sanitize git diff as well if present (handles binary files in git diff)
+        if git_diff:
+            git_diff = "".join(
+                char if ord(char) >= 32 or char in "\n\r\t" else ""
+                for char in git_diff.replace("\x00", "")
+            )
 
         # Send to Omnara
         response = self.wrapper.omnara_client_sync.send_message(
-            content=content,
+            content=sanitized_content,
             agent_type="Claude Code",
             agent_instance_id=self.wrapper.agent_instance_id,
             requires_user_input=False,
@@ -239,10 +252,6 @@ class ClaudeWrapperV3:
             file_path = input_data.get("file_path", "unknown")
             content = input_data.get("content", "")
 
-            # Truncate if too long
-            max_content_length = 300
-            content_truncated = self._truncate_text(content, max_content_length)
-
             # Detect file type for syntax highlighting
             file_ext = file_path.split(".")[-1] if "." in file_path else ""
             lang_map = {
@@ -278,7 +287,7 @@ class ClaudeWrapperV3:
 
             lines = [f"Using tool: Write - `{file_path}`"]
             lines.append(f"```{lang}")
-            lines.append(content_truncated)
+            lines.append(content)
             lines.append("```")
             return "\n".join(lines)
 
@@ -289,57 +298,168 @@ class ClaudeWrapperV3:
             )
             return f"Using tool: {tool_name} - `{file_path}`"
 
-        # Edit tool - show diff
+        # Edit tool - show full diff without truncation
         elif tool_name == "Edit":
             file_path = input_data.get("file_path", "unknown")
             old_string = input_data.get("old_string", "")
             new_string = input_data.get("new_string", "")
-
-            # Truncate if too long
-            max_diff_length = 200
-            old_truncated = self._truncate_text(old_string, max_diff_length)
-            new_truncated = self._truncate_text(new_string, max_diff_length)
+            replace_all = input_data.get("replace_all", False)
 
             # Create a markdown diff
             diff_lines = []
-            diff_lines.append(f"Using tool: Edit - `{file_path}`")
+            diff_lines.append(f"Using tool: **Edit** - `{file_path}`")
 
-            # If both are single line and short, show inline
-            if (
-                "\n" not in old_truncated
-                and "\n" not in new_truncated
-                and len(old_truncated) < 80
-                and len(new_truncated) < 80
-            ):
+            if replace_all:
+                diff_lines.append("*Replacing all occurrences*")
+
+            diff_lines.append("")
+
+            # Handle empty old_string (new content)
+            if not old_string and new_string:
+                # Adding new content
                 diff_lines.append("```diff")
-                diff_lines.append(f"- {old_truncated}")
-                diff_lines.append(f"+ {new_truncated}")
-                diff_lines.append("```")
-            else:
-                # Multi-line diff
-                diff_lines.append("```diff")
-                if old_truncated:
-                    diff_lines.append("@@ Removed @@")
-                    for line in old_truncated.splitlines():
-                        diff_lines.append(f"- {line}")
-                if old_truncated and new_truncated:
-                    diff_lines.append("@@ Added @@")
-                for line in new_truncated.splitlines():
+                for line in new_string.splitlines():
                     diff_lines.append(f"+ {line}")
                 diff_lines.append("```")
+            # Handle empty new_string (deletion)
+            elif old_string and not new_string:
+                # Removing content
+                diff_lines.append("```diff")
+                for line in old_string.splitlines():
+                    diff_lines.append(f"- {line}")
+                diff_lines.append("```")
+            # Handle replacement - try to show as inline diff if possible
+            elif old_string and new_string:
+                old_lines = old_string.splitlines()
+                new_lines = new_string.splitlines()
+
+                # Try to find the actual change within context
+                # Look for common prefix and suffix
+                common_prefix = []
+                common_suffix = []
+
+                # Find common prefix
+                for i in range(min(len(old_lines), len(new_lines))):
+                    if old_lines[i] == new_lines[i]:
+                        common_prefix.append(old_lines[i])
+                    else:
+                        break
+
+                # Find common suffix
+                old_remaining = old_lines[len(common_prefix) :]
+                new_remaining = new_lines[len(common_prefix) :]
+
+                if old_remaining and new_remaining:
+                    for i in range(1, min(len(old_remaining), len(new_remaining)) + 1):
+                        if old_remaining[-i] == new_remaining[-i]:
+                            common_suffix.insert(0, old_remaining[-i])
+                        else:
+                            break
+
+                # Get the actual changed lines
+                changed_old = (
+                    old_remaining[: len(old_remaining) - len(common_suffix)]
+                    if common_suffix
+                    else old_remaining
+                )
+                changed_new = (
+                    new_remaining[: len(new_remaining) - len(common_suffix)]
+                    if common_suffix
+                    else new_remaining
+                )
+
+                # If we have context and a focused change, show it inline style
+                if (common_prefix or common_suffix) and (changed_old or changed_new):
+                    diff_lines.append("```diff")
+
+                    # Show some context before (last 2 lines of prefix)
+                    context_before = (
+                        common_prefix[-2:] if len(common_prefix) > 2 else common_prefix
+                    )
+                    for line in context_before:
+                        diff_lines.append(f"  {line}")
+
+                    # Show removed lines
+                    for line in changed_old:
+                        diff_lines.append(f"- {line}")
+
+                    # Show added lines
+                    for line in changed_new:
+                        diff_lines.append(f"+ {line}")
+
+                    # Show some context after (first 2 lines of suffix)
+                    context_after = (
+                        common_suffix[:2] if len(common_suffix) > 2 else common_suffix
+                    )
+                    for line in context_after:
+                        diff_lines.append(f"  {line}")
+
+                    diff_lines.append("```")
+                else:
+                    # Full replacement - no common context
+                    diff_lines.append("```diff")
+                    for line in old_lines:
+                        diff_lines.append(f"- {line}")
+                    for line in new_lines:
+                        diff_lines.append(f"+ {line}")
+                    diff_lines.append("```")
 
             return "\n".join(diff_lines)
 
-        # MultiEdit tool - show file path and number of edits
+        # MultiEdit tool - show file path and all edits with full diffs
         elif tool_name == "MultiEdit":
             file_path = input_data.get("file_path", "unknown")
             edits = input_data.get("edits", [])
-            return f"Using tool: {tool_name} - `{file_path}` ({len(edits)} edits)"
+
+            lines = [f"Using tool: **MultiEdit** - `{file_path}`"]
+            lines.append(f"*Making {len(edits)} edit{'s' if len(edits) != 1 else ''}:*")
+            lines.append("")
+
+            # Show each edit with full content (no truncation)
+            for i, edit in enumerate(edits, 1):
+                old_string = edit.get("old_string", "")
+                new_string = edit.get("new_string", "")
+                replace_all = edit.get("replace_all", False)
+
+                # Add edit header
+                if replace_all:
+                    lines.append(f"### Edit {i} *(replacing all occurrences)*")
+                else:
+                    lines.append(f"### Edit {i}")
+
+                lines.append("")
+
+                # Create a proper diff display
+                lines.append("```diff")
+
+                # Handle empty old_string (new content)
+                if not old_string and new_string:
+                    # Adding new content
+                    for line in new_string.splitlines():
+                        lines.append(f"+ {line}")
+                # Handle empty new_string (deletion)
+                elif old_string and not new_string:
+                    # Removing content
+                    for line in old_string.splitlines():
+                        lines.append(f"- {line}")
+                # Handle replacement
+                elif old_string and new_string:
+                    # Show the removal first
+                    for line in old_string.splitlines():
+                        lines.append(f"- {line}")
+                    # Then show the addition
+                    for line in new_string.splitlines():
+                        lines.append(f"+ {line}")
+
+                lines.append("```")
+                lines.append("")  # Add spacing between edits
+
+            return "\n".join(lines)
 
         # Command execution
         elif tool_name == "Bash":
             command = input_data.get("command", "")
-            return f"Using tool: Bash - `{self._truncate_text(command, 80)}`"
+            return f"Using tool: Bash - `{command}`"
 
         # Search tools
         elif tool_name in ["Grep", "Glob"]:
@@ -980,8 +1100,24 @@ class ClaudeWrapperV3:
         """Run Claude CLI in a PTY"""
         claude_path = self.find_claude_cli()
 
-        # Build command with session ID
-        cmd = [claude_path, "--session-id", self.session_uuid]
+        # Check if session-related flags are present (which conflict with --session-id)
+        has_session_flag = (
+            "--continue" in sys.argv
+            or "-c" in sys.argv
+            or "--resume" in sys.argv
+            or "-r" in sys.argv
+        )
+
+        # Build command - only add session ID if not using session-related flags
+        if has_session_flag:
+            # Don't add session-id when using --continue/-c or --resume/-r
+            cmd = [claude_path]
+            self.log(
+                "[INFO] Detected session flag (--continue/-c or --resume/-r), not adding --session-id"
+            )
+        else:
+            # Normal behavior: add session ID for tracking
+            cmd = [claude_path, "--session-id", self.session_uuid]
 
         # Process any additional command line arguments
         if len(sys.argv) > 1:
