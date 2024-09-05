@@ -1358,11 +1358,55 @@ class ClaudeWrapperV3:
                 # Handle user input from stdin
                 if sys.stdin in rlist and self.original_tty_attrs:
                     try:
-                        data = os.read(sys.stdin.fileno(), 4096)
+                        # Read available data (larger buffer for efficiency)
+                        data = os.read(sys.stdin.fileno(), 65536)
                         if data:
-                            # Forward to Claude
-                            os.write(self.master_fd, data)
-                    except OSError:
+                            # Store data in a buffer attribute if PTY is full
+                            if not hasattr(self, "pending_write_buffer"):
+                                self.pending_write_buffer = b""
+
+                            # Add new data to any pending data
+                            self.pending_write_buffer += data
+
+                            # Try to write as much as possible
+                            if self.pending_write_buffer:
+                                try:
+                                    bytes_written = os.write(
+                                        self.master_fd, self.pending_write_buffer
+                                    )
+                                    # Remove written data from buffer
+                                    self.pending_write_buffer = (
+                                        self.pending_write_buffer[bytes_written:]
+                                    )
+                                except OSError as e:
+                                    if e.errno in (
+                                        35,
+                                        11,
+                                    ):  # EAGAIN/EWOULDBLOCK (35=macOS, 11=Linux)
+                                        # PTY buffer full, data remains in pending_write_buffer
+                                        pass
+                                    else:
+                                        self.log(
+                                            f"[ERROR] Unexpected error writing to PTY: {e}"
+                                        )
+                                        raise
+                    except OSError as e:
+                        self.log(f"[ERROR] Error reading from stdin: {e}")
+                        pass
+
+                # Try to flush pending write buffer when PTY might be ready
+                if hasattr(self, "pending_write_buffer") and self.pending_write_buffer:
+                    try:
+                        bytes_written = os.write(
+                            self.master_fd, self.pending_write_buffer
+                        )
+                        self.pending_write_buffer = self.pending_write_buffer[
+                            bytes_written:
+                        ]
+                    except OSError as e:
+                        if e.errno not in (35, 11):  # Log unexpected errors
+                            self.log(f"[ERROR] Unexpected error flushing buffer: {e}")
+                        # PTY still full or other error, will retry next iteration
                         pass
 
                 # Process messages from Omnara web UI
@@ -1598,10 +1642,22 @@ class ClaudeWrapperV3:
             # Quick cleanup - cancel pending tasks
             self.cancel_pending_input_request()
 
-            # Run cleanup in background daemon thread
+            # Run cleanup in background thread with timeout
             def background_cleanup():
+                import threading
+
+                # Create a timer to force exit after 10 seconds
+                def force_exit():
+                    self.log("[WARNING] Cleanup timeout reached, forcing exit")
+                    if self.debug_log_file:
+                        self.debug_log_file.flush()
+                    os._exit(0)
+
+                timer = threading.Timer(10.0, force_exit)
+                timer.daemon = True
+                timer.start()
+
                 try:
-                    # Use sync client for end_session - simpler and more reliable
                     if self.omnara_client_sync and self.agent_instance_id:
                         self.omnara_client_sync.end_session(self.agent_instance_id)
                         self.log("[INFO] Session ended successfully")
@@ -1618,20 +1674,22 @@ class ClaudeWrapperV3:
 
                     if self.debug_log_file:
                         self.log("=== Claude Wrapper V3 Log Ended ===")
-                        self.debug_log_file.flush()  # Force flush before close
+                        self.debug_log_file.flush()
                         self.debug_log_file.close()
+
+                    # Cancel timer if cleanup completed successfully
+                    timer.cancel()
+
                 except Exception as e:
                     self.log(f"[ERROR] Background cleanup error: {e}")
                     if self.debug_log_file:
                         self.debug_log_file.flush()
+                    timer.cancel()
 
-            # Start background cleanup and exit immediately
+            # Start background cleanup as non-daemon thread
             cleanup_thread = threading.Thread(target=background_cleanup)
-            cleanup_thread.daemon = True
+            cleanup_thread.daemon = False
             cleanup_thread.start()
-
-            # Give thread a tiny bit of time to start (critical for daemon thread)
-            cleanup_thread.join(timeout=0.05)
 
 
 def main():
@@ -1660,6 +1718,7 @@ def main():
 
         # First Ctrl+C - initiate graceful shutdown
         wrapper.running = False
+        wrapper.log("[INFO] SIGINT received, initiating shutdown")
 
         # Stop the async event loop to trigger cleanup
         if wrapper.async_loop and wrapper.async_loop.is_running():
