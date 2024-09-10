@@ -183,20 +183,55 @@ Trigger Claude from your phone:
 <details>
 <summary><b>🛠️ Development Setup</b></summary>
 
-**Prerequisites:** Docker, Python 3.10+, Node.js
+#### Prerequisites
+- Python 3.10+
+- PostgreSQL
+- Node.js (for CLI tools)
 
-**Quick Start:**
-```bash
-git clone https://github.com/omnara-ai/omnara
-cd omnara
-cp .env.example .env
-python scripts/generate_jwt_keys.py
-./dev-start.sh  # Starts everything automatically
-```
+#### Setup Steps
 
-**Stop services:** `./dev-stop.sh`
+1. **Clone and enter the repository**
+   ```bash
+   git clone https://github.com/omnara-ai/omnara
+   cd omnara
+   ```
 
-For detailed setup instructions, manual configuration, and contribution guidelines, see our [Contributing Guide](CONTRIBUTING.md).
+2. **Set up Python environment**
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # Windows: .venv\Scripts\activate
+   make dev-install
+   ```
+
+3. **Generate JWT keys**
+   ```bash
+   python scripts/generate_jwt_keys.py
+   ```
+
+4. **Configure environment** (create `.env` file)
+   ```env
+   DATABASE_URL=postgresql://user:password@localhost:5432/omnara
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_ANON_KEY=your-anon-key
+   JWT_PRIVATE_KEY='-----BEGIN RSA PRIVATE KEY-----\n...'
+   JWT_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----\n...'
+   ```
+
+5. **Initialize database**
+   ```bash
+   cd shared/
+   alembic upgrade head
+   cd ..
+   ```
+
+6. **Run services**
+   ```bash
+   # Terminal 1: MCP + REST Server
+   python -m servers.app
+   
+   # Terminal 2: Backend API
+   cd backend && python -m main
+   ```
 
 </details>
 
@@ -275,7 +310,7 @@ We love contributions! Check out our [Contributing Guide](CONTRIBUTING.md) to ge
 make lint       # Run code quality checks
 make format     # Auto-format code
 make test       # Run test suite
-./dev-start.sh  # Start development servers
+make dev-serve  # Start development servers
 ```
 
 ## 📊 Pricing
