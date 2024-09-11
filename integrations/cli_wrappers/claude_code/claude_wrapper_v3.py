@@ -30,7 +30,9 @@ from typing import Any, Dict, Optional
 from omnara.sdk.async_client import AsyncOmnaraClient
 from omnara.sdk.client import OmnaraClient
 from omnara.sdk.exceptions import AuthenticationError, APIError
-from webhooks.session_reset_handler import SessionResetHandler
+from integrations.cli_wrappers.claude_code.session_reset_handler import (
+    SessionResetHandler,
+)
 
 
 # Constants
@@ -775,7 +777,9 @@ class ClaudeWrapperV3:
         """Get the Claude project log directory for current working directory"""
         cwd = os.getcwd()
         # Convert path to Claude's format
-        project_name = cwd.replace("/", "-").replace(".", "-").replace(" ", "-")
+        project_name = (
+            cwd.replace("/", "-").replace(".", "-").replace(" ", "-").replace("@", "-")
+        )
         project_dir = CLAUDE_LOG_BASE / project_name
         return project_dir if project_dir.exists() else None
 
