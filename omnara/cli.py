@@ -12,6 +12,12 @@ import subprocess
 import json
 import os
 from pathlib import Path
+
+# Add project root to Python path for local development
+if __name__ == "__main__":
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 import webbrowser
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -347,29 +353,111 @@ def ensure_api_key(args):
         raise Exception(f"Authentication failed: {str(e)}")
 
 
-def run_claude_chat(args, unknown_args):
-    """Run the Claude chat integration (default behavior)"""
+def cmd_headless(args, unknown_args):
+    """Handle the 'headless' subcommand"""
     api_key = ensure_api_key(args)
 
-    # Import and run directly instead of subprocess
-    from integrations.cli_wrappers.claude_code.claude_wrapper_v3 import (
-        main as claude_wrapper_main,
-    )
+    # Import and run the headless Claude module
+    import importlib
 
-    # Prepare sys.argv for the claude wrapper
+    module = importlib.import_module("integrations.headless.claude_code")
+    headless_main = getattr(module, "main")
+
+    # Prepare sys.argv for the headless runner
     original_argv = sys.argv
-    new_argv = ["claude_wrapper_v3", "--api-key", api_key]
+    new_argv = ["headless_claude", "--api-key", api_key]
 
     if hasattr(args, "base_url") and args.base_url:
         new_argv.extend(["--base-url", args.base_url])
 
-    # Add any additional Claude arguments
+    # Add headless-specific flags
+    if hasattr(args, "prompt") and args.prompt:
+        new_argv.extend(["--prompt", args.prompt])
+
+    if hasattr(args, "permission_mode") and args.permission_mode:
+        new_argv.extend(["--permission-mode", args.permission_mode])
+
+    if hasattr(args, "allowed_tools") and args.allowed_tools:
+        new_argv.extend(["--allowed-tools", args.allowed_tools])
+
+    if hasattr(args, "disallowed_tools") and args.disallowed_tools:
+        new_argv.extend(["--disallowed-tools", args.disallowed_tools])
+
+    if hasattr(args, "cwd") and args.cwd:
+        new_argv.extend(["--cwd", args.cwd])
+
+    # Add any unrecognized arguments as extra args for Claude Code SDK
     if unknown_args:
         new_argv.extend(unknown_args)
 
     try:
         sys.argv = new_argv
-        claude_wrapper_main()
+        headless_main()
+    finally:
+        sys.argv = original_argv
+
+
+def run_agent_chat(args, unknown_args):
+    """Run the agent chat integration (Claude or Amp)"""
+    api_key = ensure_api_key(args)
+
+    # Import and run directly instead of subprocess
+
+    # Prepare sys.argv for the claude wrapper
+
+    # Agent configuration mapping
+    AGENT_CONFIGS = {
+        "claude": {
+            "module": "integrations.cli_wrappers.claude_code.claude_wrapper_v3",
+            "function": "main",
+            "argv_name": "claude_wrapper_v3",
+        },
+        "amp": {
+            "module": "integrations.cli_wrappers.amp.amp",
+            "function": "main",
+            "argv_name": "amp_wrapper",
+        },
+    }
+
+    # Get agent configuration
+    agent = getattr(args, "agent", "claude").lower()
+    config = AGENT_CONFIGS.get(agent)
+
+    if not config:
+        raise ValueError(
+            f"Unknown agent: {agent}. Supported agents: {', '.join(AGENT_CONFIGS.keys())}"
+        )
+
+    # Dynamically import the appropriate wrapper
+    import importlib
+
+    module = importlib.import_module(config["module"])
+    wrapper_main = getattr(module, config["function"])
+
+    # Prepare sys.argv for the wrapper
+    original_argv = sys.argv
+    new_argv = [config["argv_name"], "--api-key", api_key]
+
+    if hasattr(args, "base_url") and args.base_url:
+        new_argv.extend(["--base-url", args.base_url])
+
+    # Add Claude-specific flags
+    if hasattr(args, "permission_mode") and args.permission_mode:
+        new_argv.extend(["--permission-mode", args.permission_mode])
+
+    if (
+        hasattr(args, "dangerously_skip_permissions")
+        and args.dangerously_skip_permissions
+    ):
+        new_argv.append("--dangerously-skip-permissions")
+
+    # Add any additional arguments
+    if unknown_args:
+        new_argv.extend(unknown_args)
+
+    try:
+        sys.argv = new_argv
+        wrapper_main()
     finally:
         sys.argv = original_argv
 
@@ -423,6 +511,8 @@ def cmd_mcp(args):
         cmd.append("--git-diff")
     if args.agent_instance_id:
         cmd.extend(["--agent-instance-id", args.agent_instance_id])
+    if args.disable_tools:
+        cmd.append("--disable-tools")
 
     subprocess.run(cmd)
 
@@ -455,6 +545,22 @@ def add_global_arguments(parser):
         default="https://omnara.com",
         help="Base URL of the Omnara frontend for authentication",
     )
+    parser.add_argument(
+        "--agent",
+        choices=["claude", "amp"],
+        default="claude",
+        help="Which AI agent to use (default: claude)",
+    )
+    parser.add_argument(
+        "--permission-mode",
+        choices=["acceptEdits", "bypassPermissions", "default", "plan"],
+        help="Permission mode to use for the session",
+    )
+    parser.add_argument(
+        "--dangerously-skip-permissions",
+        action="store_true",
+        help="Bypass all permission checks. Recommended only for sandboxes with no internet access.",
+    )
 
 
 def main():
@@ -468,6 +574,15 @@ Examples:
   # Start Claude chat (default)
   omnara
   omnara --api-key YOUR_API_KEY
+
+  # Start Amp chat
+  omnara --agent=amp
+  omnara --agent=amp --api-key YOUR_API_KEY
+
+  # Start headless Claude (controlled via web dashboard)
+  omnara headless
+  omnara headless --prompt "Help me debug this codebase"
+  omnara headless --permission-mode acceptEdits --allowed-tools Read,Write,Bash
 
   # Start webhook server with Cloudflare tunnel
   omnara serve
@@ -539,6 +654,42 @@ Examples:
         type=str,
         help="API key to use for the MCP server",
     )
+    mcp_parser.add_argument(
+        "--disable-tools",
+        action="store_true",
+        help="Disable all tools except the permission tool",
+    )
+
+    # 'headless' subcommand
+    headless_parser = subparsers.add_parser(
+        "headless",
+        help="Run Claude Code in headless mode (controlled via web dashboard)",
+    )
+    headless_parser.add_argument(
+        "--prompt",
+        default="You are starting a coding session",
+        help="Initial prompt for headless Claude (default: 'You are starting a coding session')",
+    )
+    headless_parser.add_argument(
+        "--permission-mode",
+        choices=["acceptEdits", "bypassPermissions", "default", "plan"],
+        help="Permission mode for Claude Code",
+    )
+    headless_parser.add_argument(
+        "--allowed-tools",
+        type=str,
+        help="Comma-separated list of allowed tools (e.g., 'Read,Write,Bash')",
+    )
+    headless_parser.add_argument(
+        "--disallowed-tools",
+        type=str,
+        help="Comma-separated list of disallowed tools",
+    )
+    headless_parser.add_argument(
+        "--cwd",
+        type=str,
+        help="Working directory for headless Claude (defaults to current directory)",
+    )
 
     # Parse arguments
     args, unknown_args = parser.parse_known_args()
@@ -571,9 +722,11 @@ Examples:
         cmd_serve(args)
     elif args.command == "mcp":
         cmd_mcp(args)
+    elif args.command == "headless":
+        cmd_headless(args, unknown_args)
     else:
-        # Default behavior: run Claude chat
-        run_claude_chat(args, unknown_args)
+        # Default behavior: run agent chat (Claude or Amp based on --agent flag)
+        run_agent_chat(args, unknown_args)
 
 
 if __name__ == "__main__":

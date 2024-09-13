@@ -40,6 +40,29 @@ CLAUDE_LOG_BASE = Path.home() / ".claude" / "projects"
 OMNARA_WRAPPER_LOG_DIR = Path.home() / ".omnara" / "claude_wrapper"
 
 
+def find_claude_cli():
+    """Find Claude CLI binary"""
+    if cli := shutil.which("claude"):
+        return cli
+
+    locations = [
+        Path.home() / ".npm-global/bin/claude",
+        Path("/usr/local/bin/claude"),
+        Path.home() / ".local/bin/claude",
+        Path.home() / "node_modules/.bin/claude",
+        Path.home() / ".yarn/bin/claude",
+        Path.home() / ".claude/local/claude",
+    ]
+
+    for path in locations:
+        if path.exists() and path.is_file():
+            return str(path)
+
+    raise FileNotFoundError(
+        "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
+    )
+
+
 class MessageProcessor:
     """Message processing implementation"""
 
@@ -82,55 +105,57 @@ class MessageProcessor:
         if not self.wrapper.agent_instance_id or not self.wrapper.omnara_client_sync:
             return
 
-        # Track if this message uses tools
-        self.last_was_tool_use = bool(tools_used)
+        # Use lock to ensure atomic message processing
+        with self.wrapper.send_message_lock:
+            # Track if this message uses tools
+            self.last_was_tool_use = bool(tools_used)
 
-        # Sanitize content - remove NUL characters and control characters that break the API
-        # This handles binary content from .docx, PDFs, etc.
-        sanitized_content = "".join(
-            char if ord(char) >= 32 or char in "\n\r\t" else ""
-            for char in content.replace("\x00", "")
-        )
-
-        # Get git diff if enabled
-        git_diff = self.wrapper.get_git_diff()
-        # Sanitize git diff as well if present (handles binary files in git diff)
-        if git_diff:
-            git_diff = "".join(
+            # Sanitize content - remove NUL characters and control characters that break the API
+            # This handles binary content from .docx, PDFs, etc.
+            sanitized_content = "".join(
                 char if ord(char) >= 32 or char in "\n\r\t" else ""
-                for char in git_diff.replace("\x00", "")
+                for char in content.replace("\x00", "")
             )
 
-        # Send to Omnara
-        response = self.wrapper.omnara_client_sync.send_message(
-            content=sanitized_content,
-            agent_type="Claude Code",
-            agent_instance_id=self.wrapper.agent_instance_id,
-            requires_user_input=False,
-            git_diff=git_diff,
-        )
+            # Get git diff if enabled
+            git_diff = self.wrapper.get_git_diff()
+            # Sanitize git diff as well if present (handles binary files in git diff)
+            if git_diff:
+                git_diff = "".join(
+                    char if ord(char) >= 32 or char in "\n\r\t" else ""
+                    for char in git_diff.replace("\x00", "")
+                )
 
-        # Store instance ID if first message
-        if not self.wrapper.agent_instance_id:
-            self.wrapper.agent_instance_id = response.agent_instance_id
+            # Send to Omnara
+            response = self.wrapper.omnara_client_sync.send_message(
+                content=sanitized_content,
+                agent_type="Claude Code",
+                agent_instance_id=self.wrapper.agent_instance_id,
+                requires_user_input=False,
+                git_diff=git_diff,
+            )
 
-        # Track message for idle detection
-        self.last_message_id = response.message_id
-        self.last_message_time = time.time()
+            # Store instance ID if first message
+            if not self.wrapper.agent_instance_id:
+                self.wrapper.agent_instance_id = response.agent_instance_id
 
-        # Clear old tracked input requests since we have a new message
-        if hasattr(self.wrapper, "requested_input_messages"):
-            self.wrapper.requested_input_messages.clear()
+            # Track message for idle detection
+            self.last_message_id = response.message_id
+            self.last_message_time = time.time()
 
-        # Clear pending permission options since we have a new message
-        if hasattr(self.wrapper, "pending_permission_options"):
-            self.wrapper.pending_permission_options.clear()
+            # Clear old tracked input requests since we have a new message
+            if hasattr(self.wrapper, "requested_input_messages"):
+                self.wrapper.requested_input_messages.clear()
 
-        # Process any queued user messages
-        if response.queued_user_messages:
-            concatenated = "\n".join(response.queued_user_messages)
-            self.web_ui_messages.add(concatenated)
-            self.wrapper.input_queue.append(concatenated)
+            # Clear pending permission options since we have a new message
+            if hasattr(self.wrapper, "pending_permission_options"):
+                self.wrapper.pending_permission_options.clear()
+
+            # Process any queued user messages
+            if response.queued_user_messages:
+                concatenated = "\n".join(response.queued_user_messages)
+                self.web_ui_messages.add(concatenated)
+                self.wrapper.input_queue.append(concatenated)
 
     def should_request_input(self) -> Optional[str]:
         """Check if we should request input, returns message_id if yes"""
@@ -158,13 +183,21 @@ class MessageProcessor:
 
 
 class ClaudeWrapperV3:
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        permission_mode: Optional[str] = None,
+        dangerously_skip_permissions: bool = False,
+    ):
         # Session management
         self.session_uuid = str(uuid.uuid4())
         self.session_start_time = (
             time.time()
         )  # Track when session started for file filtering
         self.agent_instance_id = None
+        self.permission_mode = permission_mode
+        self.dangerously_skip_permissions = dangerously_skip_permissions
 
         # Set up logging
         self.debug_log_file = None
@@ -216,6 +249,9 @@ class ClaudeWrapperV3:
             set()
         )  # Track messages we've already requested input for
         self.pending_permission_options = {}  # Map option text to number for permission prompts
+        self.send_message_lock = (
+            threading.Lock()
+        )  # Lock for message sending synchronization
 
         # Git diff tracking
         self.git_diff_enabled = False
@@ -749,36 +785,16 @@ class ClaudeWrapperV3:
             api_key=self.api_key, base_url=self.base_url
         )
 
-    def find_claude_cli(self):
-        """Find Claude CLI binary"""
-        if cli := shutil.which("claude"):
-            self.log(f"[INFO] Found Claude CLI at: {cli}")
-            return cli
-
-        locations = [
-            Path.home() / ".npm-global/bin/claude",
-            Path("/usr/local/bin/claude"),
-            Path.home() / ".local/bin/claude",
-            Path.home() / "node_modules/.bin/claude",
-            Path.home() / ".yarn/bin/claude",
-            Path.home() / ".claude/local/claude",
-        ]
-
-        for path in locations:
-            if path.exists() and path.is_file():
-                self.log(f"[INFO] Found Claude CLI at: {path}")
-                return str(path)
-
-        raise FileNotFoundError(
-            "Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code"
-        )
-
     def get_project_log_dir(self):
         """Get the Claude project log directory for current working directory"""
         cwd = os.getcwd()
         # Convert path to Claude's format
         project_name = (
-            cwd.replace("/", "-").replace(".", "-").replace(" ", "-").replace("@", "-")
+            cwd.replace("/", "-")
+            .replace(".", "-")
+            .replace(" ", "-")
+            .replace("@", "-")
+            .replace("_", "-")
         )
         project_dir = CLAUDE_LOG_BASE / project_name
         return project_dir if project_dir.exists() else None
@@ -786,11 +802,10 @@ class ClaudeWrapperV3:
     def monitor_claude_jsonl(self):
         """Monitor Claude's JSONL log file for messages"""
         # Wait for log file to be created
-        expected_filename = f"{self.session_uuid}.jsonl"
-
         while self.running and not self.claude_jsonl_path:
             project_dir = self.get_project_log_dir()
             if project_dir:
+                expected_filename = f"{self.session_uuid}.jsonl"
                 expected_path = project_dir / expected_filename
                 if expected_path.exists():
                     self.claude_jsonl_path = expected_path
@@ -1210,26 +1225,23 @@ class ClaudeWrapperV3:
 
     def run_claude_with_pty(self):
         """Run Claude CLI in a PTY"""
-        claude_path = self.find_claude_cli()
+        claude_path = find_claude_cli()
+        self.log(f"[INFO] Found Claude CLI at: {claude_path}")
 
-        # Check if session-related flags are present (which conflict with --session-id)
-        has_session_flag = (
-            "--continue" in sys.argv
-            or "-c" in sys.argv
-            or "--resume" in sys.argv
-            or "-r" in sys.argv
-        )
+        # Always add session ID for tracking
+        cmd = [claude_path, "--session-id", self.session_uuid]
 
-        # Build command - only add session ID if not using session-related flags
-        if has_session_flag:
-            # Don't add session-id when using --continue/-c or --resume/-r
-            cmd = [claude_path]
+        # Add permission-mode flag if specified
+        if self.permission_mode:
+            cmd.extend(["--permission-mode", self.permission_mode])
             self.log(
-                "[INFO] Detected session flag (--continue/-c or --resume/-r), not adding --session-id"
+                f"[INFO] Added permission-mode to Claude command: {self.permission_mode}"
             )
-        else:
-            # Normal behavior: add session ID for tracking
-            cmd = [claude_path, "--session-id", self.session_uuid]
+
+        # Add dangerously-skip-permissions flag if specified
+        if self.dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+            self.log("[INFO] Added dangerously-skip-permissions to Claude command")
 
         # Process any additional command line arguments
         if len(sys.argv) > 1:
@@ -1237,11 +1249,16 @@ class ClaudeWrapperV3:
             while i < len(sys.argv):
                 arg = sys.argv[i]
                 # Skip wrapper-specific arguments
-                if arg in ["--api-key", "--base-url"]:
+                if arg in ["--api-key", "--base-url", "--permission-mode"]:
                     i += 2  # Skip the argument and its value
+                elif arg == "--dangerously-skip-permissions":
+                    i += 1  # Skip boolean flag (no value)
                 else:
                     cmd.append(arg)
                     i += 1
+
+        # Log the final command for debugging
+        self.log(f"[INFO] Final Claude command: {' '.join(cmd)}")
 
         # Save original terminal settings
         try:
@@ -1301,8 +1318,8 @@ class ClaudeWrapperV3:
                     if not hasattr(self, "_permission_assumed_time"):
                         self._permission_assumed_time = time.time()
 
-                    # After 0.25 seconds, check if we can parse the prompt from buffer
-                    elif time.time() - self._permission_assumed_time > 0.25:
+                    # After 0.5 seconds, check if we can parse the prompt from buffer
+                    elif time.time() - self._permission_assumed_time > 0.5:
                         # Clean the buffer to check for content
 
                         clean_buffer = re.sub(
@@ -1321,46 +1338,51 @@ class ClaudeWrapperV3:
                             if not hasattr(self, "_permission_handled"):
                                 self._permission_handled = True
 
-                                # Extract prompt components using the shared method
-                                question, options, options_map = (
-                                    self._extract_permission_prompt(clean_buffer)
-                                )
-
-                                # Build the message
-                                if options:
-                                    options_text = "\n".join(options)
-                                    permission_msg = f"{question}\n\n[OPTIONS]\n{options_text}\n[/OPTIONS]"
-                                    self.pending_permission_options = options_map
-                                    self.log(
-                                        f"[INFO] Permission prompt with {len(options)} options sent to Omnara"
-                                    )
-                                else:
-                                    # Fallback if parsing fails
-                                    permission_msg = f"{question}\n\n[OPTIONS]\n1. Yes\n2. Yes, and don't ask again this session\n3. No\n[/OPTIONS]"
-                                    self.pending_permission_options = {
-                                        "Yes": "1",
-                                        "Yes, and don't ask again this session": "2",
-                                        "No": "3",
-                                    }
-                                    self.log(
-                                        "[WARNING] Using default permission options (extraction failed)"
+                                # Use lock to ensure atomic permission prompt handling
+                                with self.send_message_lock:
+                                    # Extract prompt components using the shared method
+                                    question, options, options_map = (
+                                        self._extract_permission_prompt(clean_buffer)
                                     )
 
-                                # Send to Omnara with extracted text
-                                if self.agent_instance_id and self.omnara_client_sync:
-                                    response = self.omnara_client_sync.send_message(
-                                        content=permission_msg,
-                                        agent_type="Claude Code",
-                                        agent_instance_id=self.agent_instance_id,
-                                        requires_user_input=False,
-                                    )
-                                    self.message_processor.last_message_id = (
-                                        response.message_id
-                                    )
-                                    self.message_processor.last_message_time = (
-                                        time.time()
-                                    )
-                                    self.message_processor.last_was_tool_use = False
+                                    # Build the message
+                                    if options:
+                                        options_text = "\n".join(options)
+                                        permission_msg = f"{question}\n\n[OPTIONS]\n{options_text}\n[/OPTIONS]"
+                                        self.pending_permission_options = options_map
+                                        self.log(
+                                            f"[INFO] Permission prompt with {len(options)} options sent to Omnara"
+                                        )
+                                    else:
+                                        # Fallback if parsing fails
+                                        permission_msg = f"{question}\n\n[OPTIONS]\n1. Yes\n2. Yes, and don't ask again this session\n3. No\n[/OPTIONS]"
+                                        self.pending_permission_options = {
+                                            "Yes": "1",
+                                            "Yes, and don't ask again this session": "2",
+                                            "No": "3",
+                                        }
+                                        self.log(
+                                            "[WARNING] Using default permission options (extraction failed)"
+                                        )
+
+                                    # Send to Omnara with extracted text
+                                    if (
+                                        self.agent_instance_id
+                                        and self.omnara_client_sync
+                                    ):
+                                        response = self.omnara_client_sync.send_message(
+                                            content=permission_msg,
+                                            agent_type="Claude Code",
+                                            agent_instance_id=self.agent_instance_id,
+                                            requires_user_input=False,
+                                        )
+                                        self.message_processor.last_message_id = (
+                                            response.message_id
+                                        )
+                                        self.message_processor.last_message_time = (
+                                            time.time()
+                                        )
+                                        self.message_processor.last_was_tool_use = False
 
                         # Fallback after 1 second if we still don't have the full prompt
                         elif time.time() - self._permission_assumed_time > 1.0:
@@ -1861,14 +1883,48 @@ def main():
     )
     parser.add_argument("--api-key", help="Omnara API key")
     parser.add_argument("--base-url", help="Omnara base URL")
+    parser.add_argument(
+        "--permission-mode",
+        choices=["acceptEdits", "bypassPermissions", "default", "plan"],
+        help="Permission mode to use for the session",
+    )
+    parser.add_argument(
+        "--dangerously-skip-permissions",
+        action="store_true",
+        help="Bypass all permission checks. Recommended only for sandboxes with no internet access.",
+    )
 
     # Parse known args and pass the rest to Claude
     args, claude_args = parser.parse_known_args()
 
+    # Check if --continue or --resume in claude_args and bypass Omnara
+    if any(arg in ["--continue", "-c", "--resume", "-r"] for arg in claude_args):
+        print(
+            "\n⚠️  Warning: --continue and --resume flags are not yet fully supported by Omnara.",
+            file=sys.stderr,
+        )
+        print(
+            "   The flags will be passed to Claude Code, but conversation history may not appear in the Omnara dashboard.\n",
+            file=sys.stderr,
+        )
+        try:
+            claude_path = find_claude_cli()
+            # claude_args already has Omnara flags filtered out!
+            os.execvp(claude_path, [claude_path] + claude_args)
+            # Never returns - process is replaced
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # Update sys.argv to only include Claude args
     sys.argv = [sys.argv[0]] + claude_args
 
-    wrapper = ClaudeWrapperV3(api_key=args.api_key, base_url=args.base_url)
+    wrapper = ClaudeWrapperV3(
+        api_key=args.api_key,
+        base_url=args.base_url,
+        permission_mode=args.permission_mode,
+        dangerously_skip_permissions=args.dangerously_skip_permissions,
+    )
 
     def signal_handler(sig, frame):
         # Check if this is a repeated Ctrl+C (user really wants to exit)
