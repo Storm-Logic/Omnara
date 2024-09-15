@@ -2,11 +2,13 @@
 User Agent API endpoints for managing user-specific agent configurations.
 """
 
+from typing import List, Dict, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from shared.database.models import User, UserAgent
 from shared.database.session import get_db
+from shared.webhook_schemas import get_webhook_types
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
@@ -30,8 +32,20 @@ from ..db import (
 router = APIRouter(tags=["user-agents"])
 
 
+@router.get("/user-agents/webhook-types", response_model=List[Dict[str, Any]])
+async def list_webhook_types() -> List[Dict[str, Any]]:
+    """
+    Get all available webhook type schemas.
+
+    This endpoint returns the complete schema for each webhook type,
+    including all fields and their validation rules. The frontend
+    can use this to dynamically generate forms.
+    """
+    return get_webhook_types()
+
+
 @router.get("/user-agents", response_model=list[UserAgentResponse])
-async def list_user_agents(
+def list_user_agents(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -41,7 +55,7 @@ async def list_user_agents(
 
 
 @router.post("/user-agents", response_model=UserAgentResponse)
-async def create_new_user_agent(
+def create_new_user_agent(
     request: UserAgentRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -56,7 +70,7 @@ async def create_new_user_agent(
 
 
 @router.patch("/user-agents/{agent_id}", response_model=UserAgentResponse)
-async def update_existing_user_agent(
+def update_existing_user_agent(
     agent_id: UUID,
     request: UserAgentRequest,
     current_user: User = Depends(get_current_user),
@@ -70,7 +84,7 @@ async def update_existing_user_agent(
 
 
 @router.delete("/user-agents/{agent_id}")
-async def delete_existing_user_agent(
+def delete_existing_user_agent(
     agent_id: UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -85,7 +99,7 @@ async def delete_existing_user_agent(
 @router.get(
     "/user-agents/{agent_id}/instances", response_model=list[AgentInstanceResponse]
 )
-async def get_user_agent_instances_list(
+def get_user_agent_instances_list(
     agent_id: UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -122,20 +136,19 @@ async def create_agent_instance(
     if not user_agent:
         raise HTTPException(status_code=404, detail="User agent not found")
 
-    # Check if this agent has a webhook configured
-    if not user_agent.webhook_url:
+    if not user_agent.webhook_type or not user_agent.webhook_config:
         raise HTTPException(
-            status_code=400, detail="Webhook URL is required to create agent instances"
+            status_code=400,
+            detail="Webhook configuration is required to create agent instances",
         )
 
-    # Trigger the webhook
+    # Trigger the webhook - pass the entire request as a dict
+    # This allows the webhook system to be completely dynamic
     result = await trigger_webhook_agent(
         db,
         user_agent,
         current_user.id,
-        request.prompt,
-        request.name,
-        request.worktree_name,
+        request.model_dump(exclude_none=False),  # Include all fields, even if None
     )
 
     if not result.success:

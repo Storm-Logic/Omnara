@@ -4,9 +4,12 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from sqlalchemy import text
+import json
+from sqlalchemy.orm import Session
 
-from shared.database.session import get_db
+from shared.database.session import get_db, SessionLocal
 from shared.database import Message, AgentInstance, SenderType, AgentStatus
 from servers.shared.db import (
     send_agent_message,
@@ -14,6 +17,7 @@ from servers.shared.db import (
     get_or_create_agent_instance,
     get_queued_user_messages,
     create_user_message,
+    update_session_title_if_needed,
 )
 from servers.shared.notification_utils import send_message_notifications
 from .auth import get_current_user_id
@@ -26,15 +30,60 @@ from .models import (
     EndSessionResponse,
     GetMessagesResponse,
     MessageResponse,
+    VerifyAuthResponse,
 )
 
 agent_router = APIRouter(tags=["agents"])
 logger = logging.getLogger(__name__)
 
 
+@agent_router.get("/auth/verify", response_model=VerifyAuthResponse)
+def verify_auth_endpoint(
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
+) -> VerifyAuthResponse:
+    """Verify API key authentication.
+
+    This endpoint is used by n8n and other integrations to test credentials.
+    Returns basic information about the authenticated user and API key.
+    """
+    from shared.database import User
+
+    try:
+        # Get user information
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        # Get API key information (optional - just to show which key is being used)
+        # Note: We can't identify the specific key from the JWT, but we know it's valid
+        # if we got this far
+
+        return VerifyAuthResponse(
+            success=True,
+            user_id=str(user.id),
+            email=user.email,
+            display_name=user.display_name,
+            message="Authentication successful",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in verify_auth_endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error",
+        )
+
+
 @agent_router.post("/messages/agent", response_model=CreateMessageResponse)
 async def create_agent_message_endpoint(
-    request: CreateMessageRequest, user_id: Annotated[str, Depends(get_current_user_id)]
+    request: CreateMessageRequest,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
 ) -> CreateMessageResponse:
     """Create a new agent message.
 
@@ -44,7 +93,6 @@ async def create_agent_message_endpoint(
     - Returns the message ID and any queued user messages
     - Sends notifications if requested
     """
-    db = next(get_db())
 
     try:
         # Use the unified send_agent_message function
@@ -56,6 +104,7 @@ async def create_agent_message_endpoint(
             agent_type=request.agent_type,
             requires_user_input=request.requires_user_input,
             git_diff=request.git_diff,
+            message_metadata=request.message_metadata,
         )
 
         # Send notifications if requested
@@ -101,14 +150,14 @@ async def create_agent_message_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error",
         )
-    finally:
-        db.close()
 
 
 @agent_router.post("/messages/user", response_model=CreateUserMessageResponse)
-async def create_user_message_endpoint(
+def create_user_message_endpoint(
     request: CreateUserMessageRequest,
+    background_tasks: BackgroundTasks,
     user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
 ) -> CreateUserMessageResponse:
     """Create a user message.
 
@@ -116,12 +165,12 @@ async def create_user_message_endpoint(
     - Creates a user message for an existing agent instance
     - Optionally marks it as read (updates last_read_message_id)
     - Returns the message ID
+    - Triggers any waiting webhooks (e.g., n8n workflows)
+    - Generates session title if needed (in background)
     """
-    db = next(get_db())
 
     try:
-        # Create the user message
-        message_id, marked_as_read = create_user_message(
+        result = create_user_message(
             db=db,
             agent_instance_id=request.agent_instance_id,
             content=request.content,
@@ -129,13 +178,26 @@ async def create_user_message_endpoint(
             mark_as_read=request.mark_as_read,
         )
 
-        # Commit the transaction
         db.commit()
+
+        # Add background task to update session title if needed
+        def update_title_with_session():
+            db_session = SessionLocal()
+            try:
+                update_session_title_if_needed(
+                    db=db_session,
+                    instance_id=UUID(result["instance_id"]),
+                    user_message=request.content,
+                )
+            finally:
+                db_session.close()
+
+        background_tasks.add_task(update_title_with_session)
 
         return CreateUserMessageResponse(
             success=True,
-            message_id=message_id,
-            marked_as_read=marked_as_read,
+            message_id=result["id"],
+            marked_as_read=result["marked_as_read"],
         )
     except ValueError as e:
         db.rollback()
@@ -146,15 +208,77 @@ async def create_user_message_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
         )
-    finally:
-        db.close()
+
+
+@agent_router.post("/agents/instances/{agent_instance_id}/heartbeat")
+def heartbeat_instance(
+    agent_instance_id: UUID,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
+) -> dict:
+    """Record a heartbeat for an agent instance.
+
+    - Verifies the instance belongs to the authenticated user
+    - Updates last_heartbeat_at to now()
+    - Returns the updated timestamp
+    """
+    try:
+        instance = (
+            db.query(AgentInstance)
+            .filter(
+                AgentInstance.id == agent_instance_id, AgentInstance.user_id == user_id
+            )
+            .first()
+        )
+        if not instance:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Agent instance not found"
+            )
+
+        from datetime import datetime, timezone
+
+        instance.last_heartbeat_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(instance)
+
+        # Send NOTIFY to the per-instance channel so SSE clients can react immediately
+        try:
+            channel_name = f"message_channel_{agent_instance_id}"
+            payload = json.dumps(
+                {
+                    "event_type": "agent_heartbeat",
+                    "instance_id": str(agent_instance_id),
+                    "last_heartbeat_at": instance.last_heartbeat_at.isoformat() + "Z",  # pyright: ignore[reportOptionalMemberAccess]
+                }
+            )
+            # Quote channel due to hyphens in UUID
+            db.execute(text(f'NOTIFY "{channel_name}", :payload'), {"payload": payload})
+            db.commit()
+        except Exception as notify_err:
+            logger.warning(
+                f"Failed to send agent_heartbeat NOTIFY for {agent_instance_id}: {notify_err}"
+            )
+
+        return {
+            "agent_instance_id": str(instance.id),
+            "last_heartbeat_at": instance.last_heartbeat_at.isoformat() + "Z",  # pyright: ignore[reportOptionalMemberAccess]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
 
 
 @agent_router.get("/messages/pending", response_model=GetMessagesResponse)
-async def get_pending_messages(
+def get_pending_messages(
     agent_instance_id: str,
     last_read_message_id: str | None,
     user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
 ) -> GetMessagesResponse:
     """Get pending user messages for an agent instance.
 
@@ -163,7 +287,6 @@ async def get_pending_messages(
     - Updates the last_read_message_id to the latest message
     - Returns None status if another process has already read the messages
     """
-    db = next(get_db())
 
     try:
         # Validate access (agent_instance_id is required here)
@@ -211,14 +334,13 @@ async def get_pending_messages(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
         )
-    finally:
-        db.close()
 
 
 @agent_router.patch("/messages/{message_id}/request-input")
 async def request_user_input_endpoint(
     message_id: UUID,
     user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
 ) -> dict:
     """Update an agent message to request user input.
 
@@ -228,7 +350,6 @@ async def request_user_input_endpoint(
     - Returns any queued user messages since this message
     - Triggers a notification via the database trigger
     """
-    db = next(get_db())
 
     try:
         # Find the message and verify it's an agent message belonging to the user
@@ -308,13 +429,13 @@ async def request_user_input_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
         )
-    finally:
-        db.close()
 
 
 @agent_router.post("/sessions/end", response_model=EndSessionResponse)
-async def end_session_endpoint(
-    request: EndSessionRequest, user_id: Annotated[str, Depends(get_current_user_id)]
+def end_session_endpoint(
+    request: EndSessionRequest,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    db: Session = Depends(get_db),
 ) -> EndSessionResponse:
     """End an agent session and mark it as completed.
 
@@ -322,7 +443,6 @@ async def end_session_endpoint(
     - Marks the agent instance as COMPLETED
     - Sets the session end time
     """
-    db = next(get_db())
 
     try:
         # Use the end_session function from queries
@@ -348,5 +468,3 @@ async def end_session_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
         )
-    finally:
-        db.close()

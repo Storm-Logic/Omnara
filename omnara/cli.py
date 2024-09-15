@@ -25,6 +25,7 @@ import secrets
 import requests
 import time
 import threading
+import importlib
 
 
 def get_current_version():
@@ -46,7 +47,9 @@ def check_for_updates():
 
         if latest_version != current_version and current_version != "unknown":
             print(f"\n✨ Update available: {current_version} → {latest_version}")
-            print("   Run: pip install --upgrade omnara\n")
+            print("   Run: pip install --upgrade omnara")
+            print("   Please keep omnara up-to-date for the best experience")
+            print("   New versions often include important bug fixes\n")
     except Exception:
         pass
 
@@ -383,6 +386,11 @@ def ensure_api_key(args):
     if hasattr(args, "api_key") and args.api_key:
         return args.api_key
 
+    # Check if API key is in environment variable
+    env_api_key = os.environ.get("OMNARA_API_KEY")
+    if env_api_key:
+        return env_api_key
+
     # Try to load from storage
     api_key = load_stored_api_key()
     if api_key:
@@ -416,6 +424,9 @@ def cmd_headless(args, unknown_args):
 
     if hasattr(args, "base_url") and args.base_url:
         new_argv.extend(["--base-url", args.base_url])
+
+    if hasattr(args, "name") and args.name:
+        new_argv.extend(["--name", args.name])
 
     # Add headless-specific flags
     if hasattr(args, "prompt") and args.prompt:
@@ -464,6 +475,12 @@ def run_agent_chat(args, unknown_args):
             "function": "main",
             "argv_name": "amp_wrapper",
         },
+        # 'codex' is implemented as an external binary launcher; handled below
+        "codex": {
+            "module": None,
+            "function": None,
+            "argv_name": "codex",
+        },
     }
 
     # Get agent configuration
@@ -475,11 +492,14 @@ def run_agent_chat(args, unknown_args):
             f"Unknown agent: {agent}. Supported agents: {', '.join(AGENT_CONFIGS.keys())}"
         )
 
-    # Dynamically import the appropriate wrapper
-    import importlib
+    # Special-case 'codex': spawn the Rust binary with env.
+    if agent == "codex":
+        from omnara.agents.codex import run_codex
 
-    module = importlib.import_module(config["module"])
-    wrapper_main = getattr(module, config["function"])
+        return run_codex(args, unknown_args, api_key)
+
+    module = importlib.import_module(config["module"])  # type: ignore[arg-type]
+    wrapper_main = getattr(module, config["function"])  # type: ignore[index]
 
     # Prepare sys.argv for the wrapper
     original_argv = sys.argv
@@ -487,6 +507,10 @@ def run_agent_chat(args, unknown_args):
 
     if hasattr(args, "base_url") and args.base_url:
         new_argv.extend(["--base-url", args.base_url])
+
+    # Add name flag if provided
+    if hasattr(args, "name") and args.name:
+        new_argv.extend(["--name", args.name])
 
     # Add Claude-specific flags
     if hasattr(args, "permission_mode") and args.permission_mode:
@@ -497,6 +521,10 @@ def run_agent_chat(args, unknown_args):
         and args.dangerously_skip_permissions
     ):
         new_argv.append("--dangerously-skip-permissions")
+
+    # Add idle-delay flag if provided
+    if hasattr(args, "idle_delay") and args.idle_delay:
+        new_argv.extend(["--idle-delay", str(args.idle_delay)])
 
     # Add any additional arguments
     if unknown_args:
@@ -509,7 +537,7 @@ def run_agent_chat(args, unknown_args):
         sys.argv = original_argv
 
 
-def cmd_serve(args):
+def cmd_serve(args, unknown_args=None):
     """Handle the 'serve' subcommand"""
     # Run the webhook server with appropriate tunnel configuration
     cmd = [
@@ -518,13 +546,7 @@ def cmd_serve(args):
         "integrations.webhooks.claude_code.claude_code",
     ]
 
-    if args.skip_permissions:
-        cmd.append("--dangerously-skip-permissions")
-
-    if args.debug:
-        cmd.append("--debug")
-
-    # Handle tunnel configuration
+    # Handle tunnel configuration (webhook-specific)
     if not args.no_tunnel:
         # Default: use Cloudflare tunnel
         cmd.append("--cloudflare-tunnel")
@@ -536,7 +558,16 @@ def cmd_serve(args):
     if args.port is not None:
         cmd.extend(["--port", str(args.port)])
 
-    subprocess.run(cmd)
+    # Pass through ALL unknown arguments (including permission flags)
+    # These will flow through to HeadlessClaudeRunner and then to Claude CLI
+    if unknown_args:
+        cmd.extend(unknown_args)
+
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\n[INFO] Webhook server stopped by user")
+        sys.exit(0)
 
 
 def cmd_mcp(args):
@@ -561,7 +592,11 @@ def cmd_mcp(args):
     if args.disable_tools:
         cmd.append("--disable-tools")
 
-    subprocess.run(cmd)
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\n[INFO] MCP server stopped by user")
+        sys.exit(0)
 
 
 def add_global_arguments(parser):
@@ -594,9 +629,14 @@ def add_global_arguments(parser):
     )
     parser.add_argument(
         "--agent",
-        choices=["claude", "amp"],
+        choices=["claude", "amp", "codex"],
         default="claude",
         help="Which AI agent to use (default: claude)",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Name of the omnara agent (defaults to the name of the underlying agent)",
     )
     parser.add_argument(
         "--permission-mode",
@@ -607,6 +647,12 @@ def add_global_arguments(parser):
         "--dangerously-skip-permissions",
         action="store_true",
         help="Bypass all permission checks. Recommended only for sandboxes with no internet access.",
+    )
+    parser.add_argument(
+        "--idle-delay",
+        type=float,
+        default=3.5,
+        help="Delay in seconds before considering Claude idle (default: 3.5)",
     )
 
 
@@ -668,11 +714,8 @@ Examples:
     serve_parser.add_argument(
         "--port", type=int, help="Port to run the webhook server on (default: 6662)"
     )
-    serve_parser.add_argument(
-        "--skip-permissions",
-        action="store_true",
-        help="Skip permission prompts in Claude Code - USE WITH CAUTION",
-    )
+    # All permission-related args will be passed through as unknown_args
+    # No need to explicitly define them here
     serve_parser.add_argument(
         "--debug",
         action="store_true",
@@ -780,7 +823,7 @@ Examples:
 
     # Handle subcommands
     if args.command == "serve":
-        cmd_serve(args)
+        cmd_serve(args, unknown_args)
     elif args.command == "mcp":
         cmd_mcp(args)
     elif args.command == "headless":

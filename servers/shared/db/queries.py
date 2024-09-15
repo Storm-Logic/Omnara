@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
+import httpx
 from shared.database import (
     AgentInstance,
     AgentStatus,
@@ -13,6 +14,7 @@ from shared.database import (
 )
 from shared.database.billing_operations import check_agent_limit
 from shared.database.utils import sanitize_git_diff
+from shared.llms import generate_conversation_title
 from sqlalchemy.orm import Session
 from fastmcp import Context
 
@@ -114,6 +116,60 @@ def get_or_create_agent_instance(
         return instance
 
 
+def update_session_title_if_needed(
+    db: Session,
+    instance_id: UUID,
+    user_message: str,
+) -> None:
+    """
+    Update the session title if it's NULL by generating a title from the user message.
+
+    This function:
+    - Checks if the instance name is NULL
+    - If NULL, generates a title using the LLM
+    - Updates the instance name in the database
+    - Handles errors gracefully
+
+    Args:
+        db: Database session
+        instance_id: Agent instance ID
+        user_message: The user's message content
+    """
+    try:
+        # Get the instance and check if name is already set
+        instance = (
+            db.query(AgentInstance).filter(AgentInstance.id == instance_id).first()
+        )
+        if not instance:
+            logger.warning(f"Instance {instance_id} not found for title generation")
+            return
+
+        if instance.name is not None:
+            logger.debug(
+                f"Instance {instance_id} already has a name, skipping title generation"
+            )
+            return
+
+        # Generate the title using the LLM utility
+        title = generate_conversation_title(user_message)
+
+        if title:
+            instance.name = title
+            db.commit()
+            logger.info(f"Updated instance {instance_id} with title: {title}")
+        else:
+            logger.debug(f"No title generated for instance {instance_id}")
+
+    except Exception as e:
+        logger.error(
+            f"Failed to update session title for instance {instance_id}: {str(e)}"
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def end_session(db: Session, agent_instance_id: str, user_id: str) -> tuple[str, str]:
     """End an agent session by marking it as completed.
 
@@ -129,6 +185,7 @@ def end_session(db: Session, agent_instance_id: str, user_id: str) -> tuple[str,
 
     instance.status = AgentStatus.COMPLETED
     instance.ended_at = datetime.now(timezone.utc)
+    instance.last_heartbeat_at = datetime.now(timezone.utc)
 
     return str(instance.id), instance.status.value
 
@@ -138,6 +195,7 @@ def create_agent_message(
     instance_id: UUID,
     content: str,
     requires_user_input: bool = False,
+    message_metadata: dict | None = None,
 ) -> Message:
     """Create a new agent message without committing"""
     instance = db.query(AgentInstance).filter(AgentInstance.id == instance_id).first()
@@ -146,12 +204,15 @@ def create_agent_message(
             instance.status = AgentStatus.AWAITING_INPUT
         else:
             instance.status = AgentStatus.ACTIVE
+        # Stamp heartbeat for any agent activity
+        instance.last_heartbeat_at = datetime.now(timezone.utc)
 
     message = Message(
         agent_instance_id=instance_id,
         sender_type=SenderType.AGENT,
         content=content,
         requires_user_input=requires_user_input,
+        message_metadata=message_metadata,
     )
     db.add(message)
     db.flush()  # Flush to get the message ID
@@ -298,6 +359,7 @@ async def send_agent_message(
     agent_type: str | None = None,
     requires_user_input: bool = False,
     git_diff: str | None = None,
+    message_metadata: dict | None = None,
 ) -> tuple[str, str, list[Message]]:
     """High-level function to send an agent message and get queued user messages.
 
@@ -341,6 +403,7 @@ async def send_agent_message(
         instance_id=instance.id,
         content=content,
         requires_user_input=requires_user_input,
+        message_metadata=message_metadata,
     )
 
     # Handle the None case (shouldn't happen here since we just created the message)
@@ -356,7 +419,7 @@ def create_user_message(
     content: str,
     user_id: str,
     mark_as_read: bool = True,
-) -> tuple[str, bool]:
+) -> dict:
     """Create a user message for an agent instance.
 
     Args:
@@ -367,20 +430,24 @@ def create_user_message(
         mark_as_read: Whether to update last_read_message_id (default: True)
 
     Returns:
-        Tuple of (message_id, marked_as_read)
+        Dictionary with message details:
+        - id: Message ID
+        - content: Message content
+        - sender_type: "user"
+        - created_at: Creation timestamp
+        - requires_user_input: False
+        - marked_as_read: Whether the message was marked as read
+        - instance_id: The agent instance ID
 
     Raises:
         ValueError: If instance not found or user doesn't have access
     """
-    # Get the instance and validate access
     instance = get_agent_instance(db, agent_instance_id)
     if not instance:
         raise ValueError("Agent instance not found")
 
     if str(instance.user_id) != user_id:
-        raise ValueError(
-            "Access denied. Agent instance does not belong to authenticated user."
-        )
+        raise ValueError("Agent instance not found")
 
     # Create the user message
     message = Message(
@@ -391,9 +458,118 @@ def create_user_message(
     )
     db.add(message)
     db.flush()  # Get the message ID
+    db.refresh(message)  # Get database-computed values like created_at
+
+    instance.status = AgentStatus.ACTIVE
 
     # Update last_read_message_id if requested
     if mark_as_read:
         instance.last_read_message_id = message.id
 
-    return str(message.id), mark_as_read
+    # Trigger webhook if previous agent message was waiting for response
+    # TODO: do this in a background task
+    trigger_webhook_for_user_response(
+        db=db,
+        agent_instance_id=agent_instance_id,
+        user_message_content=content,
+        user_message_id=str(message.id),
+        user_id=user_id,
+    )
+
+    return {
+        "id": str(message.id),
+        "content": message.content,
+        "sender_type": message.sender_type.value,
+        "created_at": message.created_at,
+        "requires_user_input": message.requires_user_input,
+        "marked_as_read": mark_as_read,
+        "instance_id": agent_instance_id,
+    }
+
+
+def trigger_webhook_for_user_response(
+    db: Session,
+    agent_instance_id: UUID | str,
+    user_message_content: str,
+    user_message_id: str,
+    user_id: str,
+) -> None:
+    """Trigger webhook if the last agent message was waiting for user input.
+
+    This function checks if the previous agent message has a webhook URL in its
+    metadata and triggers it with the user's response.
+    """
+    # Convert to UUID if string
+    if isinstance(agent_instance_id, str):
+        agent_instance_id = UUID(agent_instance_id)
+
+    # Find the last agent message that requires user input
+    last_agent_message = (
+        db.query(Message)
+        .filter(
+            Message.agent_instance_id == agent_instance_id,
+            Message.sender_type == SenderType.AGENT,
+            Message.requires_user_input,
+        )
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+
+    if not last_agent_message:
+        return
+
+    # Check if it has a webhook URL in metadata
+    if not last_agent_message.message_metadata:
+        return
+
+    webhook_url = last_agent_message.message_metadata.get("webhook_url")
+    if not webhook_url:
+        return
+
+    # Check if webhook was already triggered
+    if last_agent_message.message_metadata.get("webhook_triggered"):
+        logger.info(f"Webhook already triggered for message {last_agent_message.id}")
+        return
+
+    # Prepare webhook payload
+    webhook_payload = {
+        "user_message": user_message_content,
+        "user_id": user_id,
+        "message_id": user_message_id,
+        "agent_instance_id": str(agent_instance_id),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # TODO: call this in the background so user message doesn't hang
+    try:
+        with httpx.Client() as client:
+            response = client.post(
+                webhook_url,
+                json=webhook_payload,
+                timeout=10.0,  # 10 second timeout
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Omnara-Webhook": "true",
+                },
+            )
+
+            if response.status_code >= 200 and response.status_code < 300:
+                logger.info(
+                    f"Successfully triggered webhook for agent instance {agent_instance_id}"
+                )
+                # Mark webhook as triggered to prevent multiple triggers
+                if not last_agent_message.message_metadata:
+                    last_agent_message.message_metadata = {}
+                last_agent_message.message_metadata["webhook_triggered"] = True
+                last_agent_message.message_metadata["webhook_response_status"] = (
+                    response.status_code
+                )
+            else:
+                logger.warning(
+                    f"Webhook returned non-success status {response.status_code} "
+                    f"for agent instance {agent_instance_id}"
+                )
+    except Exception as e:
+        logger.error(
+            f"Failed to trigger webhook for agent instance {agent_instance_id}: {e}"
+        )

@@ -1,9 +1,9 @@
 from uuid import UUID
-import asyncio
 import json
 from typing import AsyncGenerator
+import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from shared.database.models import User
 from shared.database.session import get_db, SessionLocal
@@ -20,7 +20,6 @@ from ..db import (
     get_all_agent_instances,
     get_all_agent_types_with_instances,
     mark_instance_completed,
-    submit_user_message,
     delete_agent_instance,
     update_agent_instance_name,
     get_message_by_id,
@@ -34,12 +33,13 @@ from ..models import (
     UserMessageRequest,
     UserMessageResponse,
 )
+from servers.shared.db import create_user_message, update_session_title_if_needed
 
 router = APIRouter(tags=["agents"])
 
 
 @router.get("/agent-types", response_model=list[AgentTypeOverview])
-async def list_agent_types(
+def list_agent_types(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -49,7 +49,7 @@ async def list_agent_types(
 
 
 @router.get("/agent-instances", response_model=list[AgentInstanceResponse])
-async def list_all_agent_instances(
+def list_all_agent_instances(
     limit: int | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -60,7 +60,7 @@ async def list_all_agent_instances(
 
 
 @router.get("/agent-summary")
-async def get_all_agent_summary(
+def get_all_agent_summary(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -72,7 +72,7 @@ async def get_all_agent_summary(
 @router.get(
     "/agent-types/{type_id}/instances", response_model=list[AgentInstanceResponse]
 )
-async def get_type_instances(
+def get_type_instances(
     type_id: UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -85,7 +85,7 @@ async def get_type_instances(
 
 
 @router.get("/agent-instances/{instance_id}", response_model=AgentInstanceDetail)
-async def get_instance_detail(
+def get_instance_detail(
     instance_id: UUID,
     message_limit: int = 50,
     before_message_id: UUID | None = None,
@@ -106,7 +106,7 @@ async def get_instance_detail(
 
 
 @router.get("/agent-instances/{instance_id}/messages")
-async def get_instance_messages_paginated(
+def get_instance_messages_paginated(
     instance_id: UUID,
     limit: int = 50,
     before_message_id: UUID | None = None,
@@ -130,17 +130,54 @@ async def get_instance_messages_paginated(
 @router.post(
     "/agent-instances/{instance_id}/messages", response_model=UserMessageResponse
 )
-async def create_user_message(
+def create_user_message_endpoint(
     instance_id: UUID,
     request: UserMessageRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Send a message to an agent instance (answers questions or provides feedback)"""
-    result = submit_user_message(db, instance_id, request.content, current_user.id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Agent instance not found")
-    return result
+    try:
+        # Use the unified create_user_message function
+        result = create_user_message(
+            db=db,
+            agent_instance_id=str(instance_id),
+            content=request.content,
+            user_id=str(current_user.id),
+            mark_as_read=False,  # Backend doesn't mark as read
+        )
+
+        # Commit the transaction
+        db.commit()
+
+        # Add background task to update session title if needed
+        # Create a wrapper function to ensure proper session cleanup
+        def update_title_with_session():
+            db_session = SessionLocal()
+            try:
+                update_session_title_if_needed(
+                    db=db_session, instance_id=instance_id, user_message=request.content
+                )
+            finally:
+                db_session.close()
+
+        background_tasks.add_task(update_title_with_session)
+
+        # Convert to UserMessageResponse format
+        return UserMessageResponse(
+            id=result["id"],
+            content=result["content"],
+            sender_type=result["sender_type"],
+            created_at=result["created_at"],
+            requires_user_input=result["requires_user_input"],
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.get("/agent-instances/{instance_id}/messages/stream")
@@ -265,6 +302,11 @@ async def stream_messages(
 
                         yield f"event: git_diff_update\ndata: {json.dumps(data)}\n\n"
 
+                    elif event_type == "agent_heartbeat":
+                        # Forward agent heartbeat updates (last_heartbeat_at changes)
+                        # Expect payload to include: instance_id, last_heartbeat_at
+                        yield f"event: agent_heartbeat\ndata: {json.dumps(data)}\n\n"
+
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive
                     yield f"event: heartbeat\ndata: {json.dumps({'timestamp': asyncio.get_event_loop().time()})}\n\n"
@@ -294,7 +336,7 @@ async def stream_messages(
     "/agent-instances/{instance_id}/status",
     response_model=AgentInstanceResponse,
 )
-async def update_agent_status(
+def update_agent_status(
     instance_id: UUID,
     status_update: dict,
     current_user: User = Depends(get_current_user),
@@ -312,7 +354,7 @@ async def update_agent_status(
 
 
 @router.delete("/agent-instances/{instance_id}")
-async def delete_agent_instance_endpoint(
+def delete_agent_instance_endpoint(
     instance_id: UUID,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -325,7 +367,7 @@ async def delete_agent_instance_endpoint(
 
 
 @router.patch("/agent-instances/{instance_id}", response_model=AgentInstanceResponse)
-async def update_agent_instance_endpoint(
+def update_agent_instance_endpoint(
     instance_id: UUID,
     update_data: dict,
     current_user: User = Depends(get_current_user),

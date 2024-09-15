@@ -9,7 +9,6 @@ from shared.database import (
     APIKey,
     Message,
     PushToken,
-    SenderType,
     User,
     UserAgent,
 )
@@ -23,7 +22,6 @@ from backend.models import (
     AgentInstanceResponse,
     AgentInstanceDetail,
     MessageResponse,
-    UserMessageResponse,
     AgentTypeOverview,
 )
 
@@ -108,6 +106,7 @@ def _format_instance(
         latest_message=latest_message,
         latest_message_at=latest_message_at,
         chat_length=chat_length,
+        last_heartbeat_at=instance.last_heartbeat_at,
     )
 
 
@@ -466,44 +465,7 @@ def get_agent_instance_detail(
         last_read_message_id=str(instance.last_read_message_id)
         if instance.last_read_message_id
         else None,
-    )
-
-
-def submit_user_message(
-    db: Session, instance_id: UUID, content: str, user_id: UUID
-) -> UserMessageResponse | None:
-    """Submit a user message to an agent instance"""
-
-    # Check if instance exists and belongs to user
-    instance = (
-        db.query(AgentInstance)
-        .filter(AgentInstance.id == instance_id, AgentInstance.user_id == user_id)
-        .first()
-    )
-    if not instance:
-        return None
-
-    # Create new user message
-    user_message = Message(
-        agent_instance_id=instance_id,
-        sender_type=SenderType.USER,
-        content=content,
-        requires_user_input=False,
-    )
-    db.add(user_message)
-
-    if instance.status != AgentStatus.COMPLETED:
-        instance.status = AgentStatus.ACTIVE
-
-    db.commit()
-    db.refresh(user_message)
-
-    return UserMessageResponse(
-        id=str(user_message.id),
-        content=user_message.content,
-        sender_type=user_message.sender_type.value,
-        created_at=user_message.created_at,
-        requires_user_input=user_message.requires_user_input,
+        last_heartbeat_at=instance.last_heartbeat_at,
     )
 
 
