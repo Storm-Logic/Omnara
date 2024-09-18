@@ -27,14 +27,14 @@ class OmnaraClient:
 
     Args:
         api_key: JWT API key for authentication
-        base_url: Base URL of the API server (default: https://agent-dashboard-mcp.onrender.com)
+        base_url: Base URL of the API server (default: https://agent.omnara.com)
         timeout: Default timeout for requests in seconds (default: 30)
     """
 
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://agent-dashboard-mcp.onrender.com",
+        base_url: str = "https://agent.omnara.com",
         timeout: int = 30,
     ):
         self.api_key = api_key
@@ -62,7 +62,11 @@ class OmnaraClient:
 
         # Set default headers
         self.session.headers.update(
-            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "omnara-python-sdk",
+            }
         )
 
     def __enter__(self):
@@ -148,7 +152,8 @@ class OmnaraClient:
             send_push: Send push notification (default: False for steps, user pref for questions)
             send_email: Send email notification (default: False for steps, user pref for questions)
             send_sms: Send SMS notification (default: False for steps, user pref for questions)
-            git_diff: Git diff content to include (optional)
+            git_diff: Git diff content to include (optional). This SDK encodes
+                the diff in base64 for transmission; the server auto-detects and decodes.
 
         Returns:
             CreateMessageResponse with any queued user messages
