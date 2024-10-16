@@ -1,180 +1,226 @@
 ---
 title: Quickstart
-description: 'Get started with Omnara in under 5 minutes'
+description: Launch an agent, watch it reply live, and answer its first question — in the console or using the API
+icon: "rocket"
 ---
 
-<Steps>
-  <Step title="Install Omnara">
-    Choose your preferred package manager:
+## Create an account
 
-    <CodeGroup>
-    ```bash pip
-    pip install omnara
-    ```
+Sign in at [app.omnara.com](https://app.omnara.com). Onboarding creates your first organization and project — that's where your agent will live.
 
-    ```bash homebrew
-    brew install omnara
-    ```
+## Connect a model provider
 
-    ```bash uv
-    uv tool install omnara
-    ```
+Omnara is model-agnostic: you bring a provider API key, and agents use the models you've configured.
 
-    ```bash pipx
-    pipx install omnara
-    ```
-    </CodeGroup>
-  </Step>
+<Tabs>
+<Tab title="Console">
+  1. Under **Models** in the sidebar, click **New provider**. Pick OpenAI, OpenRouter, or Anthropic, and name the provider. This guide uses `openai-prod`.
+  2. Create the credential secret inline (**New secret**) with your provider API key, then click **Add provider**.
+  3. In the **Add models** step, select `gpt-5.6` and create it. Models added this way are prefixed with the provider name, so it lands under **Configured models** as `openai-prod - gpt-5.6`.
+  4. Grant the model to your project: on the model's row, click **Grant to project** and pick your project.
+</Tab>
+<Tab title="API">
+  The same chain is four calls — store the key as a credential secret, create the provider config, add the configured model, grant it to your project. [Model providers](/organization/model-providers) walks each one with full requests and responses.
+</Tab>
+</Tabs>
 
-  <Step title="Start Your Agent">
-    Launch Claude Code with dashboard integration:
+## Launch, watch, and answer
 
-    ```bash
-    omnara
-    ```
+<Tabs>
+<Tab title="Console">
+  <Steps>
+    <Step title="Create the agent">
+      In your project, open **Agents** and click **New agent**. Switch to the **YAML** tab and paste this config — an instruction, a model, and the tools the agent may use:
 
-    On first run, this will:
-    1. Open your browser for authentication
-    2. Prompt you to sign in to Omnara (or create an account)
-    3. Automatically save your API key to `~/.omnara/credentials.json`
+      ```yaml
+      version: v1
+      name: Research assistant
+      instruction: |
+        Research the questions the user sends you. Use web search for current
+        information, cite sources, and ask for clarification when needed.
+      model:
+        provider_config: openai-prod
+        name: openai-prod - gpt-5.6
+      tools:
+        web_search: {}
+        web_fetch: {}
+        ask_question: {}
+      ```
 
-    Everything you do in the terminal is now synced to your [dashboard](https://omnara.com/dashboard) and mobile app.
+      `model.name` must match a configured model exactly, as shown on the **Models** page — substitute yours if it's named differently.
 
-    <Tip>
-    Authentication happens automatically on first run. You can also explicitly authenticate with `omnara --auth` if needed.
-    </Tip>
-  </Step>
+      In **First message (optional)**, give it the task:
 
-  <Step title="Try Other Modes">
-    Explore different usage patterns:
+      ```text
+      Find the Omnara blog post "The Log Is the Agent." Before summarizing it, use
+      ask_question to ask me one question: whether I want a technical or
+      non-technical explanation. Then explain its main idea, give me three key
+      takeaways, and link to the post.
+      ```
 
-    <CodeGroup>
-    ```bash Headless
-    # Run in background without terminal UI
-    omnara headless --prompt "Review this codebase"
-    ```
+      Click **Create agent**. The console validates the config, launches the agent, and drops you into its conversation view.
+    </Step>
+    <Step title="Answer the scope question">
+      The agent pauses and an **Agent question** card appears in the conversation. Choose an option and click **Submit**. The agent resumes immediately.
+    </Step>
+    <Step title="Watch it work">
+      The conversation view is live: you'll see the agent's web searches appear as tool activity, text stream in as it's generated, and the finished reply land.
+    </Step>
+    <Step title="Continue the conversation">
+      Type a follow-up in the composer and hit **Send**:
 
-    ```bash Webhook Server
-    # Enable remote triggering
-    omnara serve
-    ```
+      ```text
+      How does this help an agent recover when a machine disconnects?
+      ```
+    </Step>
+  </Steps>
 
-    ```bash Different Agent
-    # Use Codex instead of Claude Code
-    omnara --agent codex
-    ```
-    </CodeGroup>
-  </Step>
-</Steps>
+</Tab>
+<Tab title="API">
+  <Steps>
+    <Step title="Get an API key and set up your shell">
+      You need `curl` and `jq`. Go to **API Tokens** in the sidebar and click **New token**. The token is shown once — copy it, then:
 
-## Next Steps
+      ```bash
+      export OMNARA_API="https://api.omnara.com/v1"        # or your self-hosted origin + /api/v1
+      export OMNARA_TOKEN="omnara_pat_..."                # the API key you just created
+      ```
+    </Step>
+    <Step title="Find your org and project">
+      Every agent belongs to a project inside an organization. These commands select your first organization and project:
+
+      ```bash
+      export ORG="$(
+        curl -fsS "$OMNARA_API/me" \
+          -H "Authorization: Bearer $OMNARA_TOKEN" |
+        jq -r '.orgs[0].id'
+      )"
+
+      export PROJ="$(
+        curl -fsS "$OMNARA_API/orgs/$ORG/projects?limit=1" \
+          -H "Authorization: Bearer $OMNARA_TOKEN" |
+        jq -r '.data[0].id'
+      )"
+      ```
+
+      These select the first available organization and project. If you have more than one, set `ORG` and `PROJ` to the IDs you want instead.
+    </Step>
+    <Step title="Create the config">
+      An agent config is a small YAML document: an instruction, a model, and the tools the agent may use. Save this as `agent.yaml`:
+
+      ```yaml
+      version: v1
+      name: Research assistant
+      instruction: |
+        Research the questions the user sends you. Use web search for current
+        information, cite sources, and ask for clarification when needed.
+      model:
+        provider_config: openai-prod
+        name: openai-prod - gpt-5.6
+      tools:
+        web_search: {}
+        web_fetch: {}
+        ask_question: {}
+      ```
+
+      `model.name` must match a configured model exactly — this guide uses the console-created name `openai-prod - gpt-5.6`; substitute yours if it differs.
+
+      Create the config and save its ID:
+
+      ```bash
+      export CONFIG="$(
+        jq -n --rawfile src agent.yaml '{source: $src, source_format: "yaml"}' |
+        curl -fsS "$OMNARA_API/orgs/$ORG/projects/$PROJ/agent-configs" \
+          -H "Authorization: Bearer $OMNARA_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d @- |
+        jq -r '.id'
+      )"
+      ```
+
+      The API validates the model and tools. Submitting the same source again returns the same config ID.
+    </Step>
+    <Step title="Launch the agent">
+      Launch the agent with its first task and save the agent ID:
+
+      ```bash
+      export AGENT="$(
+        curl -fsS "$OMNARA_API/orgs/$ORG/projects/$PROJ/agents" \
+          -H "Authorization: Bearer $OMNARA_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "config": "'"$CONFIG"'",
+            "message": "Find the Omnara blog post \"The Log Is the Agent.\" Before summarizing it, use ask_question to ask me one question: whether I want a technical or non-technical explanation. Then explain its main idea, give me three key takeaways, and link to the post."
+          }' |
+        jq -r '.agent.id'
+      )"
+      ```
+
+      The agent starts working immediately.
+    </Step>
+    <Step title="Stream the reply">
+      Open the event stream. `stream_deltas=true` includes partial output while the model responds:
+
+      ```bash
+      curl -N "$OMNARA_API/orgs/$ORG/projects/$PROJ/agents/$AGENT/events/stream?stream_deltas=true" \
+        -H "Authorization: Bearer $OMNARA_TOKEN"
+      ```
+
+      Leave this terminal running. It shows the opening input, the agent's question, its tool calls, and the final response. [Streaming events](/events/streaming) explains reconnection and event formats.
+    </Step>
+    <Step title="Answer the scope question">
+      When the question appears in the stream, use a second terminal to get the open interaction's ID:
+
+      ```bash
+      export INTERACTION="$(
+        curl -fsS "$OMNARA_API/orgs/$ORG/projects/$PROJ/agents/$AGENT/interactions?state=open" \
+          -H "Authorization: Bearer $OMNARA_TOKEN" |
+        jq -r '.data[0].id'
+      )"
+      ```
+
+      Resolve it by option index. This selects the first option:
+
+      ```bash
+      curl -fsS "$OMNARA_API/orgs/$ORG/projects/$PROJ/agents/$AGENT/interactions/$INTERACTION/resolve" \
+        -H "Authorization: Bearer $OMNARA_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"answers": [{"option_indices": [0]}]}'
+      ```
+
+      The agent resumes immediately, and the stream shows its research and final response.
+    </Step>
+    <Step title="Continue the conversation">
+      Send a follow-up from the second terminal:
+
+      ```bash
+      curl -fsS "$OMNARA_API/orgs/$ORG/projects/$PROJ/agents/$AGENT/inputs" \
+        -H "Authorization: Bearer $OMNARA_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"content_blocks": [{"type": "text", "text": "How does this help an agent recover when a machine disconnects?"}]}'
+      ```
+
+      That's the complete flow: define, launch, and converse.
+    </Step>
+  </Steps>
+</Tab>
+</Tabs>
+
+## Next steps
+
+Next, see how these pieces combine in the [repo Slack agent](/examples/repo-slack-agent): a Slack bot that works on a real repository using machines, secrets, and permissions.
 
 <CardGroup cols={2}>
-  <Card
-    title="CLI Commands"
-    icon="terminal"
-    href="/cli/overview"
-  >
-    Explore all available commands
+  <Card title="How Omnara works" icon="sitemap" href="/how-omnara-works">
+    The object model behind what you just did
   </Card>
-  <Card
-    title="n8n Integration"
-    icon="workflow"
-    href="/integrations/n8n"
-  >
-    Add human-in-the-loop to workflows
+  <Card title="Agents" icon="robot" href="/agents/overview">
+    Launch, update, cancel, and archive agents
   </Card>
-  <Card
-    title="Python SDK"
-    icon="python"
-    href="/api/sdk"
-  >
-    Build custom integrations
+  <Card title="Agent configuration" icon="file-code" href="/agents/configuration">
+    Define models, tools, permissions, and machines
   </Card>
-  <Card
-    title="Environment Variables"
-    icon="gear"
-    href="/cli/environment-variables"
-  >
-    Configure with env vars
+  <Card title="Streaming events" icon="tower-broadcast" href="/events/streaming">
+    Read history, follow live activity, and reconnect safely
   </Card>
 </CardGroup>
-
-## Common Workflows
-
-<AccordionGroup>
-  <Accordion title="Development with Claude Code" icon="code">
-    ```bash
-    # Set Claude as default
-    omnara --set-default claude
-
-    # Start a named session
-    omnara --name "Feature Development"
-
-    # Work in terminal as usual
-    # Everything syncs to dashboard automatically
-    ```
-  </Accordion>
-
-  <Accordion title="Background Code Review" icon="magnifying-glass">
-    ```bash
-    # Start headless review
-    omnara headless \
-      --prompt "Review all files in src/ for security issues" \
-      --allowed-tools Read,Grep \
-      --cwd /path/to/project
-
-    # Check dashboard for results
-    # Respond to any questions Claude asks
-    ```
-  </Accordion>
-
-  <Accordion title="Remote Mobile Development" icon="mobile">
-    ```bash
-    # On your computer, start webhook server
-    omnara serve
-
-    # From your phone:
-    # 1. Open Omnara app
-    # 2. Go to Settings → Integrations
-    # 3. Add webhook configuration
-    # 4. Tap "Launch Agent" to trigger Claude on your computer
-    ```
-  </Accordion>
-</AccordionGroup>
-
-## Troubleshooting
-
-<AccordionGroup>
-  <Accordion title="Authentication fails">
-    ```bash
-    # Try re-authenticating
-    omnara --reauth
-
-    # Or set API key manually
-    export OMNARA_API_KEY="your-key-here"
-    omnara
-    ```
-  </Accordion>
-
-  <Accordion title="Agent not found">
-    Ensure the agent CLI is installed:
-
-    ```bash
-    # Claude Code
-    claude --version
-
-    # Codex (packaged with Omnara)
-    # Should work out of the box
-
-    # Amp
-    amp --version
-    ```
-  </Accordion>
-
-  <Accordion title="Dashboard not updating">
-    1. Check you're not using `--no-relay`
-    2. Verify internet connection
-    3. Check logs: `~/.omnara/<agent>_wrapper/<session-id>.log`
-  </Accordion>
-</AccordionGroup>
