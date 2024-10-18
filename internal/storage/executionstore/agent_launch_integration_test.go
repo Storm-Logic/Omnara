@@ -821,6 +821,12 @@ func TestArchiveAgentMarksPoolMachinesDeletingAndStopsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire runtime lock: %v", err)
 	}
+	seedProviderRuntimeMismatchForTest(
+		t,
+		ctx,
+		pool,
+		result.MachineBindings[0].MachineID,
+	)
 	archivedAgent, archivedMachines, err := store.Execution().ArchiveAgent(
 		ctx,
 		testProjectID,
@@ -868,6 +874,7 @@ func TestArchiveAgentMarksPoolMachinesDeletingAndStopsExecution(t *testing.T) {
 	if machine.NextReconcileAfter == nil || !machine.NextReconcileAfter.Equal(archivedAt) {
 		t.Fatalf("pool machine next reconcile = %v, want %v", machine.NextReconcileAfter, archivedAt)
 	}
+	assertProviderRuntimeMismatchClearedForTest(t, ctx, pool, machine.ID)
 	directAfter, err := store.Execution().GetMachine(ctx, testOrgID, directMachine.ID)
 	if err != nil {
 		t.Fatalf("get direct machine after archive: %v", err)
@@ -1265,6 +1272,13 @@ WHERE datname = current_database()
 		emptyYAML,
 		now.Add(5*time.Second),
 	)
+	seedProviderRuntimeMismatchForTest(
+		t,
+		ctx,
+		pool,
+		originalMachine.Machine.ID,
+		future.Machine.Machine.ID,
+	)
 	machineTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin machine lock transaction: %v", err)
@@ -1354,6 +1368,13 @@ WHERE datname = current_database()
 	if deleted.LifecycleState != "deleting" || deleted.LifecycleReasonCode != "agent_config_machine_source_removed" {
 		t.Fatalf("removed pool machine = %+v", deleted)
 	}
+	assertProviderRuntimeMismatchClearedForTest(
+		t,
+		ctx,
+		pool,
+		originalMachine.Machine.ID,
+		future.Machine.Machine.ID,
+	)
 	if _, err := store.Execution().DeleteMachinePool(ctx, testOrgID, machinePool.ID); err != nil {
 		t.Fatalf("delete removed machine pool: %v", err)
 	}
@@ -3095,7 +3116,7 @@ tools:
 	}
 }
 
-func TestLaunchAgentPoolPerMachineCPUCapacityRollsBackAllRows(t *testing.T) {
+func TestLaunchAgentPoolPerMachineLimitsRollBackAllRows(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	pool := openIntegrationDB(t, ctx)
@@ -3106,8 +3127,8 @@ func TestLaunchAgentPoolPerMachineCPUCapacityRollsBackAllRows(t *testing.T) {
 	user, err := store.Identity().CreateVerifiedUser(
 		ctx,
 		CreateVerifiedUserInput{
-			Email:       "launch-pool-per-machine-cpu-capacity@example.com",
-			DisplayName: "Launch Pool Per Machine CPU Capacity User",
+			Email:       "launch-pool-per-machine-limits@example.com",
+			DisplayName: "Launch Pool Per Machine Limits User",
 		},
 	)
 	if err != nil {
@@ -3115,6 +3136,7 @@ func TestLaunchAgentPoolPerMachineCPUCapacityRollsBackAllRows(t *testing.T) {
 	}
 	maxCPU := 10
 	maxMachineCPU := 1
+	minMachineMemoryMB := 2048
 	machinePool, err := store.Execution().CreateMachinePool(
 		ctx,
 		completeMachinePoolCreateInputForTest(
@@ -3123,16 +3145,18 @@ func TestLaunchAgentPoolPerMachineCPUCapacityRollsBackAllRows(t *testing.T) {
 			store,
 			machinePoolInputWithDefaultMachineForTest(
 				executionstore.CreateMachinePoolInput{
-					OrgID:            testOrgID,
-					Name:             "Launch Per Machine CPU Capacity Pool",
-					Provider:         "test",
-					MaxTotalMachines: 5,
-					MaxTotalCPU:      &maxCPU,
-					MaxMachineCPU:    &maxMachineCPU,
+					OrgID:              testOrgID,
+					Name:               "Launch Per Machine Limits Pool",
+					Provider:           "test",
+					MaxTotalMachines:   5,
+					MaxTotalCPU:        &maxCPU,
+					MinMachineMemoryMB: &minMachineMemoryMB,
+					MaxMachineCPU:      &maxMachineCPU,
 				},
 				defaultMachineFieldsForTest{
 					DefaultMachineCPU:             1,
-					DefaultMachineProviderOptions: json.RawMessage(`{"image":"per-machine-cpu-capacity"}`),
+					DefaultMachineMemoryMB:        2048,
+					DefaultMachineProviderOptions: json.RawMessage(`{"image":"per-machine-limits"}`),
 				},
 			),
 		))
@@ -3146,75 +3170,101 @@ func TestLaunchAgentPoolPerMachineCPUCapacityRollsBackAllRows(t *testing.T) {
 			OrgID:          testOrgID,
 			ProjectID:      testProjectID,
 			MachinePoolID:  machinePool.ID,
-			IdempotencyKey: "idem-launch-per-machine-cpu-capacity-pool-grant",
+			IdempotencyKey: "idem-launch-per-machine-limits-pool-grant",
 		})
 
 	if err != nil {
 		t.Fatalf("create pool grant: %v", err)
 	}
-	profile := mustCreateConfigAndProfileBookmarkFromYAML(
-		t,
-		ctx,
-		store,
-		"launch-per-machine-cpu-capacity-pool",
-		"Launch Per Machine CPU Capacity Pool Agent",
-		`
-name: Launch Per Machine CPU Capacity Pool Agent
-instruction: Use too much cpu on one machine.
+	for _, test := range []struct {
+		name           string
+		profileName    string
+		displayName    string
+		idempotencyKey string
+		machineCPU     int
+		machineMemory  int
+	}{
+		{
+			name:           "maximum cpu",
+			profileName:    "launch-per-machine-maximum-cpu",
+			displayName:    "Launch Per Machine Maximum CPU Agent",
+			idempotencyKey: "idem-launch-per-machine-maximum-cpu-agent",
+			machineCPU:     2,
+			machineMemory:  2048,
+		},
+		{
+			name:           "minimum memory",
+			profileName:    "launch-per-machine-minimum-memory",
+			displayName:    "Launch Per Machine Minimum Memory Agent",
+			idempotencyKey: "idem-launch-per-machine-minimum-memory-agent",
+			machineCPU:     1,
+			machineMemory:  1024,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile := mustCreateConfigAndProfileBookmarkFromYAML(
+				t,
+				ctx,
+				store,
+				test.profileName,
+				test.displayName,
+				fmt.Sprintf(`
+name: %s
+instruction: Exercise a per-machine resource limit.
 model:
   provider_config: openai-prod
   name: gpt-test
 machine_sources:
-  - machine_pool_name: `+machinePool.Name+`
+  - machine_pool_name: %s
     max_machines: 1
     initial_num_machines: 1
-    machine_cpu: 2
+    machine_cpu: %d
+    machine_memory_mb: %d
 tools:
   run_command: {}
-`,
-		now,
-	)
+`, test.displayName, machinePool.Name, test.machineCPU, test.machineMemory),
+				now,
+			)
 
-	if _, err := store.Execution().LaunchAgent(
-		ctx,
-		executionstore.LaunchAgentInput{
-			ProjectID:      testProjectID,
-			ProfileID:      profile.ID,
-			AgentConfigID:  profile.CurrentConfigID,
-			LaunchedBy:     userPrincipal(user.ID),
-			IdempotencyKey: "idem-launch-per-machine-cpu-capacity-agent",
-		},
-	); !errors.Is(
-		err,
-		storeerr.ErrStateTransitionConflict,
-	) {
-		t.Fatalf("launch per-machine cpu capacity error = %v, want ErrStateTransitionConflict", err)
-	}
-	var agents, machines, grants, bindings int
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM agents WHERE project_id = $1 AND idempotency_key = 'idem-launch-per-machine-cpu-capacity-agent'`, testProjectID).
-		Scan(&agents); err != nil {
-		t.Fatalf("count rolled back agents: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM machines WHERE org_id = $1 AND machine_pool_id = $2`, testOrgID, machinePool.ID).
-		Scan(&machines); err != nil {
-		t.Fatalf("count pool machines: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM project_machine_grants WHERE project_id = $1 AND project_machine_pool_grant_id = $2`, testProjectID, poolGrant.ID).
-		Scan(&grants); err != nil {
-		t.Fatalf("count generated grants: %v", err)
-	}
-	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM agent_machine_bindings WHERE project_id = $1`, testProjectID).
-		Scan(&bindings); err != nil {
-		t.Fatalf("count machine bindings: %v", err)
-	}
-	if agents != 0 || machines != 0 || grants != 0 || bindings != 0 {
-		t.Fatalf(
-			"per-machine cpu capacity rollback counts agents=%d machines=%d grants=%d bindings=%d, want all zero",
-			agents,
-			machines,
-			grants,
-			bindings,
-		)
+			if _, err := store.Execution().LaunchAgent(
+				ctx,
+				executionstore.LaunchAgentInput{
+					ProjectID:      testProjectID,
+					ProfileID:      profile.ID,
+					AgentConfigID:  profile.CurrentConfigID,
+					LaunchedBy:     userPrincipal(user.ID),
+					IdempotencyKey: test.idempotencyKey,
+				},
+			); !errors.Is(err, storeerr.ErrStateTransitionConflict) {
+				t.Fatalf("launch per-machine limit error = %v, want ErrStateTransitionConflict", err)
+			}
+			var agents, machines, grants, bindings int
+			if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM agents WHERE project_id = $1 AND idempotency_key = $2`, testProjectID, test.idempotencyKey).
+				Scan(&agents); err != nil {
+				t.Fatalf("count rolled back agents: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM machines WHERE org_id = $1 AND machine_pool_id = $2`, testOrgID, machinePool.ID).
+				Scan(&machines); err != nil {
+				t.Fatalf("count pool machines: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM project_machine_grants WHERE project_id = $1 AND project_machine_pool_grant_id = $2`, testProjectID, poolGrant.ID).
+				Scan(&grants); err != nil {
+				t.Fatalf("count generated grants: %v", err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM agent_machine_bindings WHERE project_id = $1`, testProjectID).
+				Scan(&bindings); err != nil {
+				t.Fatalf("count machine bindings: %v", err)
+			}
+			if agents != 0 || machines != 0 || grants != 0 || bindings != 0 {
+				t.Fatalf(
+					"per-machine limit rollback counts agents=%d machines=%d grants=%d bindings=%d, want all zero",
+					agents,
+					machines,
+					grants,
+					bindings,
+				)
+			}
+		})
 	}
 }
 
@@ -3854,7 +3904,10 @@ func TestPoolProvisioningAttemptFenceRejectsStaleCompletion(t *testing.T) {
 	}
 	if _, err := pool.Exec(
 		ctx,
-		`UPDATE machines SET next_reconcile_after = statement_timestamp() - interval '1 second' WHERE org_id = $1 AND id = $2`,
+		`UPDATE machines
+		 SET next_reconcile_after = statement_timestamp() - interval '1 second',
+		     failure_report = '{"stage":"startup_script"}'::jsonb
+		 WHERE org_id = $1 AND id = $2`,
 		testOrgID,
 		result.MachineBindings[0].MachineID,
 	); err != nil {
@@ -3870,6 +3923,18 @@ func TestPoolProvisioningAttemptFenceRejectsStaleCompletion(t *testing.T) {
 	}
 	if firstClaim.Machine.ProvisionAttempts != 1 || secondClaim.Machine.ProvisionAttempts != 2 {
 		t.Fatalf("unexpected attempts first=%+v second=%+v", firstClaim, secondClaim)
+	}
+	var failureReport *json.RawMessage
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT failure_report FROM machines WHERE org_id = $1 AND id = $2`,
+		testOrgID,
+		result.MachineBindings[0].MachineID,
+	).Scan(&failureReport); err != nil {
+		t.Fatalf("load failure report after retry claim: %v", err)
+	}
+	if failureReport != nil {
+		t.Fatalf("failure report after retry claim = %s, want null", *failureReport)
 	}
 	if _, err := store.Execution().BeginPoolMachineProviderProvisioning(
 		ctx,
@@ -3951,6 +4016,7 @@ func TestPoolProvisioningAttemptFenceRejectsStaleCompletion(t *testing.T) {
 		current.ProviderResourceID != "" || current.ProviderProvisionAttemptedAt == nil {
 		t.Fatalf("stale attempt changed machine: %+v", current)
 	}
+	seedProviderRuntimeMismatchForTest(t, ctx, pool, result.MachineBindings[0].MachineID)
 	recordPoolMachineProvisioningResourceForTest(
 		t,
 		ctx,
@@ -3958,6 +4024,12 @@ func TestPoolProvisioningAttemptFenceRejectsStaleCompletion(t *testing.T) {
 		result.MachineBindings[0].MachineID,
 		secondClaim.Machine.ProvisionAttempts,
 		"current-resource",
+	)
+	assertProviderRuntimeMismatchClearedForTest(
+		t,
+		ctx,
+		pool,
+		result.MachineBindings[0].MachineID,
 	)
 	replayed, err := store.Execution().RecordPoolMachineProvisioningResource(
 		ctx,

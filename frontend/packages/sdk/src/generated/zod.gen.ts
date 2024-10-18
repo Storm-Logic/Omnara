@@ -42,6 +42,7 @@ export const zError = z.object({
         'service_unavailable',
         'idempotency_key_conflict',
         'state_transition_conflict',
+        'managed_work_admission_denied',
         'pending_work',
         'not_wake_capable',
         'daemon_runtime_unregistered',
@@ -732,9 +733,15 @@ export const zModelOutputStopReason = z.enum([
     'error'
 ]);
 
+/**
+ * String key-value metadata. Maximum 16 pairs, keys up to 64 characters, and values up to 512 characters. Keys beginning with `omnara_` are reserved for Omnara and may affect product behavior; use them only when intentionally invoking Omnara-defined behavior.
+ */
+export const zContentBlockMetadata = z.record(z.string(), z.string().max(512));
+
 export const zTextContentBlock = z.object({
     type: z.enum(['text']),
-    text: z.string()
+    text: z.string(),
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zInlineMediaContentBlock = z.object({
@@ -754,22 +761,26 @@ export const zInlineMediaContentBlock = z.object({
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     ]),
     filename: z.string().max(255).optional(),
-    data: z.string().min(1)
+    data: z.string().min(1),
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zMediaRefContentBlock = z.object({
     type: z.enum(['media_ref']),
-    artifact_id: zArtifactId
+    artifact_id: zArtifactId,
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zReasoningContentBlock = z.object({
     type: z.enum(['reasoning']),
-    text: z.string()
+    text: z.string(),
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zErrorContentBlock = z.object({
     type: z.enum(['error']),
-    text: z.string()
+    text: z.string(),
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zCreateAgentInputContentBlock = z.discriminatedUnion('type', [
@@ -841,7 +852,8 @@ export const zJsonBlob = z.unknown();
 
 export const zStructuredDataContentBlock = z.object({
     type: z.enum(['structured_data']),
-    value: zJsonBlob
+    value: zJsonBlob,
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zToolResultContentBlock = z.discriminatedUnion('type', [
@@ -882,7 +894,8 @@ export const zModelToolCallContentBlock = z.object({
     tool_call_id: zToolCallId,
     tool_type: zToolCallType,
     name: z.string(),
-    input: zToolInput
+    input: zToolInput,
+    metadata: zContentBlockMetadata.optional()
 });
 
 export const zModelOutputContentBlock = z.discriminatedUnion('type', [
@@ -1377,9 +1390,19 @@ export const zOAuthTokenSetSecretMaterial = z.object({
     token_type: z.string().min(1).optional()
 });
 
+export const zAwsCredentialsSecretMaterial = z.object({
+    kind: z.enum(['aws_credentials']),
+    access_key_id: z.string().min(1),
+    secret_access_key: z.string().min(1),
+    session_token: z.string().min(1).optional(),
+    role_arn: z.string().min(1).optional(),
+    external_id: z.string().min(1).optional()
+});
+
 export const zSecretMaterial = z.discriminatedUnion('kind', [
     zGenericSecretMaterial.extend({ kind: z.literal('generic') }),
-    zOAuthTokenSetSecretMaterial.extend({ kind: z.literal('oauth_token_set') })
+    zOAuthTokenSetSecretMaterial.extend({ kind: z.literal('oauth_token_set') }),
+    zAwsCredentialsSecretMaterial.extend({ kind: z.literal('aws_credentials') })
 ]);
 
 export const zCreateSecretRequest = z.object({
@@ -1405,7 +1428,8 @@ export const zSecretGrantCreateRequest = z.object({
 export const zSecretKind = z.enum([
     'generic',
     'oauth_token_set',
-    'slack_app_credentials'
+    'slack_app_credentials',
+    'aws_credentials'
 ]);
 
 export const zSecret = z.object({
@@ -1578,9 +1602,12 @@ export const zCreateMachinePoolRequestBase = z.object({
     default_cwd: z.string().optional(),
     provider_config: z.record(z.string(), z.unknown()).optional(),
     provider_auth_secret_id: zSecretId,
+    runtime_protection_enabled: z.boolean().optional().default(false),
     max_total_machines: z.int().gte(0).lte(2147483647),
     max_total_cpu: z.int().gte(0).lte(2147483647).optional(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).optional(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).optional(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).optional(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).optional(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).optional(),
     metadata: z.record(z.string(), z.unknown()).optional()
@@ -1622,9 +1649,12 @@ export const zUpdateMachinePoolRequest = z.object({
     default_cwd: z.string().optional(),
     provider_config: z.record(z.string(), z.unknown()).optional(),
     provider_auth_secret_id: zSecretId.optional(),
+    runtime_protection_enabled: z.boolean().optional(),
     max_total_machines: z.int().gte(0).lte(2147483647).optional(),
     max_total_cpu: z.int().gte(0).lte(2147483647).nullish(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).nullish(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullish(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullish(),
     metadata: z.record(z.string(), z.unknown()).optional()
@@ -1645,9 +1675,12 @@ export const zMachinePool = z.object({
     default_cwd: z.string(),
     provider_auth_secret_id: zSecretId.optional(),
     provider_config: z.record(z.string(), z.unknown()),
+    runtime_protection_enabled: z.boolean(),
     max_total_machines: z.int().gte(0).lte(2147483647),
     max_total_cpu: z.int().gte(0).lte(2147483647).nullable(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).nullable(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullable(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullable(),
     metadata: z.record(z.string(), z.unknown()),
@@ -1691,6 +1724,7 @@ export const zMachine = z.object({
     provider: z.string(),
     lifecycle_state: zMachineLifecycleState,
     connection_state: zMachineConnectionState,
+    connection_state_reason: z.string().optional(),
     last_observed_at: zTimestamp.nullable(),
     cwd: z.string(),
     env: z.record(z.string(), z.string()),
@@ -1806,6 +1840,8 @@ export const zProjectMachinePoolGrant = z.object({
     max_total_machines: z.int().gte(0).lte(2147483647).nullable(),
     max_total_cpu: z.int().gte(0).lte(2147483647).nullable(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).nullable(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullable(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullable(),
     metadata: z.record(z.string(), z.unknown()),
@@ -1825,6 +1861,8 @@ export const zCreateProjectMachinePoolGrantRequest = z.object({
     max_total_machines: z.int().gte(0).lte(2147483647).optional(),
     max_total_cpu: z.int().gte(0).lte(2147483647).optional(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).optional(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).optional(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).optional(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).optional(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).optional(),
     metadata: z.record(z.string(), z.unknown()).optional()
@@ -1844,6 +1882,8 @@ export const zUpdateProjectMachinePoolGrantRequest = z.object({
     max_total_machines: z.int().gte(0).lte(2147483647).nullish(),
     max_total_cpu: z.int().gte(0).lte(2147483647).nullish(),
     max_total_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
+    min_machine_cpu: z.int().gte(0).lte(2147483647).nullish(),
+    min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullish(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullish(),
     metadata: z.record(z.string(), z.unknown()).optional()
@@ -2197,6 +2237,11 @@ export const zRevokePersonalAccessTokenResponse = zPersonalAccessToken;
  * Machine daemon bootstrap information.
  */
 export const zBootstrapDaemonResponse2 = zBootstrapDaemonResponse;
+
+/**
+ * Machine failure recorded.
+ */
+export const zRecordMachineFailureResponse = z.void();
 
 /**
  * Idempotent replay of an existing organization creation.

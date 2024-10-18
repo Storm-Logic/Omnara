@@ -55,9 +55,12 @@ func (s *Server) machinePoolResponse(record executionstore.MachinePoolRecord) (o
 		DefaultMachineProviderOptions: defaultMachineProviderOptions,
 		DefaultCwd:                    record.DefaultCwd,
 		ProviderConfig:                providerConfig,
+		RuntimeProtectionEnabled:      record.RuntimeProtectionEnabled,
 		MaxTotalMachines:              record.MaxTotalMachines,
 		MaxTotalCpu:                   nullableInt32FromIntPtr(record.MaxTotalCPU),
 		MaxTotalMemoryMb:              nullableInt32FromIntPtr(record.MaxTotalMemoryMB),
+		MinMachineCpu:                 nullableInt32FromIntPtr(record.MinMachineCPU),
+		MinMachineMemoryMb:            nullableInt32FromIntPtr(record.MinMachineMemoryMB),
 		MaxMachineCpu:                 nullableInt32FromIntPtr(record.MaxMachineCPU),
 		MaxMachineMemoryMb:            nullableInt32FromIntPtr(record.MaxMachineMemoryMB),
 		Metadata:                      metadata,
@@ -182,6 +185,8 @@ func (s strictOpenAPIServer) createMachinePool(
 	if !ok {
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "invalid provider_auth_secret_id")
 	}
+	runtimeProtectionEnabled := request.Body.RuntimeProtectionEnabled != nil &&
+		*request.Body.RuntimeProtectionEnabled
 	record, err := s.server.store.Execution().CreateMachinePool(ctx, executionstore.CreateMachinePoolInput{
 		OrgID:                         org.ID,
 		Name:                          request.Body.Name,
@@ -195,9 +200,12 @@ func (s strictOpenAPIServer) createMachinePool(
 		DefaultCwd:                    defaultCwd,
 		ProviderConfig:                providerConfig,
 		ProviderAuthSecretID:          providerAuthSecretID,
+		RuntimeProtectionEnabled:      runtimeProtectionEnabled,
 		MaxTotalMachines:              request.Body.MaxTotalMachines,
 		MaxTotalCPU:                   intPtrFromInt32(request.Body.MaxTotalCpu),
 		MaxTotalMemoryMB:              intPtrFromInt32(request.Body.MaxTotalMemoryMb),
+		MinMachineCPU:                 intPtrFromInt32(request.Body.MinMachineCpu),
+		MinMachineMemoryMB:            intPtrFromInt32(request.Body.MinMachineMemoryMb),
 		MaxMachineCPU:                 intPtrFromInt32(request.Body.MaxMachineCpu),
 		MaxMachineMemoryMB:            intPtrFromInt32(request.Body.MaxMachineMemoryMb),
 		Metadata:                      metadata,
@@ -310,9 +318,12 @@ func (s strictOpenAPIServer) updateMachinePool(
 		DefaultCwd:                    request.Body.DefaultCwd,
 		ProviderConfig:                providerConfig,
 		ProviderAuthSecretID:          providerAuthSecretID,
+		RuntimeProtectionEnabled:      request.Body.RuntimeProtectionEnabled,
 		MaxTotalMachines:              request.Body.MaxTotalMachines,
 		MaxTotalCPU:                   nullableIntPatchFromInt32(request.Body.MaxTotalCpu),
 		MaxTotalMemoryMB:              nullableIntPatchFromInt32(request.Body.MaxTotalMemoryMb),
+		MinMachineCPU:                 nullableIntPatchFromInt32(request.Body.MinMachineCpu),
+		MinMachineMemoryMB:            nullableIntPatchFromInt32(request.Body.MinMachineMemoryMb),
 		MaxMachineCPU:                 nullableIntPatchFromInt32(request.Body.MaxMachineCpu),
 		MaxMachineMemoryMB:            nullableIntPatchFromInt32(request.Body.MaxMachineMemoryMb),
 		Metadata:                      metadata,

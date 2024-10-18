@@ -1,9 +1,9 @@
-import { useCreateMachinePool } from '@omnara/react'
-import { useGrantMachinePoolToProject } from '@omnara/react'
+import { useCreateMachinePool, useGrantMachinePoolToProject } from '@omnara/react'
 import type { MachinePool } from '@omnara/sdk'
 import { useForm } from '@tanstack/react-form'
 import { useState } from 'react'
 
+import { StartupScriptField } from '@/components/machines/StartupScriptField'
 import { ProjectGrantsField } from '@/components/projects/ProjectGrantsField'
 import { CredentialSecretField } from '@/components/secrets/CredentialSecretField'
 import { Button } from '@/components/ui/button'
@@ -15,9 +15,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { FieldGroup } from '@/components/ui/field'
 import { Spinner } from '@/components/ui/spinner'
-import { Textarea } from '@/components/ui/textarea'
 import { collectGrantFailures, type RetryGrantsPhase } from '@/lib/grant-failures'
 import { errorMessage } from '@/lib/submit-status'
 
@@ -120,6 +119,8 @@ export function CreateMachinePoolDialog({
                       form.setFieldValue('memoryMb', nextValues.memoryMb)
                       form.setFieldValue('maxTotalCpu', nextValues.maxTotalCpu)
                       form.setFieldValue('maxTotalMemoryMb', nextValues.maxTotalMemoryMb)
+                      form.setFieldValue('minMachineCpu', nextValues.minMachineCpu)
+                      form.setFieldValue('minMachineMemoryMb', nextValues.minMachineMemoryMb)
                       form.setFieldValue('maxMachineCpu', nextValues.maxMachineCpu)
                       form.setFieldValue('maxMachineMemoryMb', nextValues.maxMachineMemoryMb)
                       form.setFieldValue('secretId', nextValues.secretId)
@@ -212,25 +213,22 @@ export function CreateMachinePoolDialog({
                 />
               )}
             </form.Subscribe>
-            <form.Field name="startupScript">
-              {(field) => (
-                <Field>
-                  <FieldLabel htmlFor="mpool-startup-script">Startup script (optional)</FieldLabel>
-                  <FieldDescription>
-                    Shell script that runs on each new machine before the daemon starts.
-                  </FieldDescription>
-                  <Textarea
-                    id="mpool-startup-script"
-                    value={field.state.value}
-                    placeholder={'apt-get update\napt-get install -y ripgrep'}
-                    className="min-h-20 resize-y font-mono text-xs"
-                    onChange={(event) => {
-                      field.handleChange(event.target.value)
-                    }}
-                  />
-                </Field>
+            <form.Subscribe selector={(state) => state.values.provider}>
+              {(provider) => (
+                <form.Field name="startupScript">
+                  {(field) => (
+                    <StartupScriptField
+                      id="mpool-startup-script"
+                      label="Startup script (optional)"
+                      provider={provider}
+                      value={field.state.value}
+                      placeholder={'apt-get update\napt-get install -y ripgrep'}
+                      onChange={field.handleChange}
+                    />
+                  )}
+                </form.Field>
               )}
-            </form.Field>
+            </form.Subscribe>
             <form.Subscribe selector={(state) => state.values}>
               {(values) => (
                 <CreateMachinePoolAdvancedSection

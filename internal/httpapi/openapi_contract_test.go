@@ -253,6 +253,7 @@ func TestOpenAPISpecialRouteContracts(t *testing.T) {
 		method string
 	}{
 		{"/api/v1/daemon/bootstrap", "post"},
+		{"/api/v1/daemon/failures", "post"},
 		{"/api/v1/daemon/runtimes", "post"},
 		{"/api/v1/daemon/runtimes/{runtimeID}/socket", "get"},
 		{"/api/v1/daemon/runtimes/{runtimeID}/end", "post"},
@@ -291,6 +292,7 @@ func TestOpenAPISpecialRouteContracts(t *testing.T) {
 	}
 	machineOnlyMutations := map[string]bool{
 		"post /api/v1/daemon/bootstrap":                  true,
+		"post /api/v1/daemon/failures":                   true,
 		"post /api/v1/daemon/runtimes":                   true,
 		"post /api/v1/daemon/runtimes/{runtimeID}/end":   true,
 		"post /api/v1/daemon/runtimes/{runtimeID}/sleep": true,
@@ -735,6 +737,13 @@ func TestOpenAPIRequestValidatorEnforcesMachinePoolProviderShape(t *testing.T) {
 			name: "blaxel rejects cpu limit",
 			body: `{"provider":"blaxel",` + common +
 				`,"default_machine_memory_mb":1024,"max_total_cpu":4,` +
+				`"max_total_memory_mb":8192,"max_machine_memory_mb":4096}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "blaxel rejects cpu minimum",
+			body: `{"provider":"blaxel",` + common +
+				`,"default_machine_memory_mb":1024,"min_machine_cpu":1,` +
 				`"max_total_memory_mb":8192,"max_machine_memory_mb":4096}`,
 			want: http.StatusBadRequest,
 		},

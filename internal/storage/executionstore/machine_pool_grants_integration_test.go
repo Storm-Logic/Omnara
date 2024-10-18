@@ -137,6 +137,133 @@ func intPtrForMachinePoolTest(value int) *int {
 	return &value
 }
 
+func boolPtrForMachinePoolTest(value bool) *bool {
+	return &value
+}
+
+func TestMachinePoolRuntimeProtectionDefaultsOffAndToggleClearsMarkers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := openIntegrationDB(t, ctx)
+	seedMigratedDB(t, ctx, pool)
+	store := newIntegrationStore(pool, WithMachinePoolProviders(mergingMachinePoolProviders{}))
+
+	unprotected, err := store.Execution().CreateMachinePool(
+		ctx,
+		completeMachinePoolCreateInputForTest(
+			t,
+			ctx,
+			store,
+			executionstore.CreateMachinePoolInput{
+				OrgID:            testOrgID,
+				Name:             "Unprotected By Default",
+				Provider:         "test.provider",
+				MaxTotalMachines: 1,
+			},
+		),
+	)
+	if err != nil {
+		t.Fatalf("create default-unprotected machine pool: %v", err)
+	}
+	if unprotected.RuntimeProtectionEnabled {
+		t.Fatal("omitted runtime protection did not default off")
+	}
+
+	protected, err := store.Execution().CreateMachinePool(
+		ctx,
+		completeMachinePoolCreateInputForTest(
+			t,
+			ctx,
+			store,
+			executionstore.CreateMachinePoolInput{
+				OrgID:                    testOrgID,
+				Name:                     "Explicitly Protected",
+				Provider:                 "test.provider",
+				RuntimeProtectionEnabled: true,
+				MaxTotalMachines:         1,
+			},
+		),
+	)
+	if err != nil {
+		t.Fatalf("create explicitly protected machine pool: %v", err)
+	}
+	if !protected.RuntimeProtectionEnabled {
+		t.Fatal("explicitly enabled runtime protection was disabled")
+	}
+
+	machineID := testID("runtime-protection-marker-machine")
+	now := time.Now().UTC()
+	if _, err := pool.Exec(ctx, `
+INSERT INTO machines(
+    id, org_id, machine_pool_id, source_kind, display_name, provider,
+    lifecycle_state, lifecycle_changed_at, provider_resource_id,
+    provider_provision_attempted_at, cpu, memory_mb, cwd, env, secret_env,
+    provider_options, provider_runtime_mismatch_since, metadata, created_at, updated_at
+) VALUES (
+    $1, $2, $3, 'pool', 'runtime protection marker', $4,
+    'active', $5, 'provider-resource', $5, 1, 1024, '', '{}'::jsonb, '{}'::jsonb,
+    '{}'::jsonb, $5, '{}'::jsonb, $5, $5
+)
+`, machineID, testOrgID, protected.ID, protected.Provider, now); err != nil {
+		t.Fatalf("seed runtime mismatch marker: %v", err)
+	}
+	updated, err := store.Execution().UpdateMachinePool(
+		ctx,
+		executionstore.UpdateMachinePoolInput{
+			OrgID:                    testOrgID,
+			ID:                       protected.ID,
+			RuntimeProtectionEnabled: boolPtrForMachinePoolTest(false),
+		},
+	)
+	if err != nil {
+		t.Fatalf("disable runtime protection: %v", err)
+	}
+	if updated.RuntimeProtectionEnabled {
+		t.Fatal("runtime protection remained enabled")
+	}
+	var mismatchSince *time.Time
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT provider_runtime_mismatch_since FROM machines WHERE org_id = $1 AND id = $2`,
+		testOrgID,
+		machineID,
+	).Scan(&mismatchSince); err != nil {
+		t.Fatalf("load runtime mismatch marker: %v", err)
+	}
+	if mismatchSince != nil {
+		t.Fatalf("runtime mismatch marker survived protection disable: %v", mismatchSince)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE machines SET provider_runtime_mismatch_since = statement_timestamp() WHERE org_id = $1 AND id = $2`,
+		testOrgID,
+		machineID,
+	); err != nil {
+		t.Fatalf("seed stale disabled marker: %v", err)
+	}
+	if _, err := store.Execution().UpdateMachinePool(
+		ctx,
+		executionstore.UpdateMachinePoolInput{
+			OrgID:                    testOrgID,
+			ID:                       protected.ID,
+			RuntimeProtectionEnabled: boolPtrForMachinePoolTest(true),
+		},
+	); err != nil {
+		t.Fatalf("re-enable runtime protection: %v", err)
+	}
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT provider_runtime_mismatch_since FROM machines WHERE org_id = $1 AND id = $2`,
+		testOrgID,
+		machineID,
+	).Scan(&mismatchSince); err != nil {
+		t.Fatalf("reload runtime mismatch marker: %v", err)
+	}
+	if mismatchSince != nil {
+		t.Fatalf("stale mismatch marker survived protection re-enable: %v", mismatchSince)
+	}
+}
+
 func completeMachinePoolCreateInputForTest(
 	t *testing.T,
 	ctx context.Context,
@@ -424,6 +551,8 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 	updatedMaxTotalMachines := int32(3)
 	updatedMaxTotalCPU := 8
 	updatedMaxTotalMemoryMB := 16384
+	updatedMinMachineCPU := 1
+	updatedMinMachineMemoryMB := 1024
 	updatedMaxMachineCPU := 4
 	updatedMaxMachineMemoryMB := 8192
 	updated, err := store.Execution().UpdateMachinePool(ctx, machinePoolUpdateInputWithDefaultMachineForTest(
@@ -438,6 +567,8 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 			MaxTotalMachines:     &updatedMaxTotalMachines,
 			MaxTotalCPU:          patch.NullableInt{Set: true, Value: &updatedMaxTotalCPU},
 			MaxTotalMemoryMB:     patch.NullableInt{Set: true, Value: &updatedMaxTotalMemoryMB},
+			MinMachineCPU:        patch.NullableInt{Set: true, Value: &updatedMinMachineCPU},
+			MinMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMinMachineMemoryMB},
 			MaxMachineCPU:        patch.NullableInt{Set: true, Value: &updatedMaxMachineCPU},
 			MaxMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMaxMachineMemoryMB},
 			Metadata:             json.RawMessage(`{"team":"infra"}`),
@@ -459,6 +590,8 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 		updated.DefaultCwd != "/updated" || updated.ProviderAuthSecretID != rotatedProviderAuthSecretID ||
 		updated.MaxTotalMachines != 3 || updated.MaxTotalCPU == nil || *updated.MaxTotalCPU != 8 ||
 		updated.MaxTotalMemoryMB == nil || *updated.MaxTotalMemoryMB != 16384 ||
+		updated.MinMachineCPU == nil || *updated.MinMachineCPU != 1 ||
+		updated.MinMachineMemoryMB == nil || *updated.MinMachineMemoryMB != 1024 ||
 		updated.MaxMachineCPU == nil || *updated.MaxMachineCPU != 4 ||
 		updated.MaxMachineMemoryMB == nil || *updated.MaxMachineMemoryMB != 8192 {
 		t.Fatalf("update did not apply mutable fields: %+v", updated)
@@ -472,6 +605,10 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 	}
 	if machinePoolProviders.validatedPolicy.ResourceLimits.MaxTotalCPU == nil ||
 		*machinePoolProviders.validatedPolicy.ResourceLimits.MaxTotalCPU != 8 ||
+		machinePoolProviders.validatedPolicy.ResourceLimits.MinMachineCPU == nil ||
+		*machinePoolProviders.validatedPolicy.ResourceLimits.MinMachineCPU != 1 ||
+		machinePoolProviders.validatedPolicy.ResourceLimits.MinMachineMemoryMB == nil ||
+		*machinePoolProviders.validatedPolicy.ResourceLimits.MinMachineMemoryMB != 1024 ||
 		machinePoolProviders.validatedPolicy.ResourceLimits.MaxMachineMemoryMB == nil ||
 		*machinePoolProviders.validatedPolicy.ResourceLimits.MaxMachineMemoryMB != 8192 {
 		t.Fatalf("provider validator limits = %+v, want updated limits", machinePoolProviders.validatedPolicy.ResourceLimits)
@@ -857,11 +994,16 @@ func TestMachinePoolSecretEnvValidatesAndMaterializes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get launch pool grant: %v", err)
 	}
+	agentPlainValue := "agent-plain"
+	agentSecretRef := orgSecretID
 	resolvedMachine, err := store.Execution().ResolvePoolMachineTx(
 		ctx,
 		store.q,
 		poolGrant,
-		agentconfig.RuntimeMachine{},
+		agentconfig.RuntimeMachine{
+			EnvOverlay:       map[string]*string{"AGENT_PLAIN": &agentPlainValue},
+			SecretEnvOverlay: map[string]*string{"AGENT_SECRET": &agentSecretRef},
+		},
 	)
 	if err != nil {
 		t.Fatalf("resolve pool machine: %v", err)
@@ -924,14 +1066,27 @@ func TestMachinePoolSecretEnvValidatesAndMaterializes(t *testing.T) {
 	if claim.GrantProjectID != testProjectID {
 		t.Fatalf("claim grant project = %s, want %s", claim.GrantProjectID, testProjectID)
 	}
+	if got := claim.BindingEnvironmentOverlay.Env["AGENT_PLAIN"]; got == nil || *got != agentPlainValue {
+		t.Fatalf("claim binding env overlay = %+v, want AGENT_PLAIN", claim.BindingEnvironmentOverlay)
+	}
+	if got := claim.BindingEnvironmentOverlay.SecretEnv["AGENT_SECRET"]; got == nil || *got != agentSecretRef {
+		t.Fatalf("claim binding secret env overlay = %+v, want AGENT_SECRET", claim.BindingEnvironmentOverlay)
+	}
 	provisioningEnv, err := store.Execution().ResolvePoolMachineProvisioningEnv(ctx, claim)
 	if err != nil {
 		t.Fatalf("resolve provisioning env: %v", err)
 	}
-	if len(provisioningEnv) != len(wantEnv) {
-		t.Fatalf("provisioning env = %+v, want %+v", provisioningEnv, wantEnv)
+	wantProvisioningEnv := map[string]string{
+		"PLAIN":          "plain",
+		"ORG_SECRET":     "org-secret-value",
+		"PROJECT_SECRET": "project-secret-value",
+		"AGENT_PLAIN":    "agent-plain",
+		"AGENT_SECRET":   "org-secret-value",
 	}
-	for key, want := range wantEnv {
+	if len(provisioningEnv) != len(wantProvisioningEnv) {
+		t.Fatalf("provisioning env = %+v, want %+v", provisioningEnv, wantProvisioningEnv)
+	}
+	for key, want := range wantProvisioningEnv {
 		if got := provisioningEnv[key]; got != want {
 			t.Fatalf("provisioning env[%s] = %q, want %q; env=%+v", key, got, want, provisioningEnv)
 		}
@@ -1075,6 +1230,7 @@ func TestCreateProjectMachinePoolGrantAppliesOnlyPerMachineLimitsToResolvedResou
 	machines0 := 0
 	machines9 := 9
 	cpu2 := 2
+	cpu8 := 8
 	memory4096 := 4096
 	cases := []struct {
 		name        string
@@ -1116,6 +1272,19 @@ func TestCreateProjectMachinePoolGrantAppliesOnlyPerMachineLimitsToResolvedResou
 			wantCreated: true,
 		},
 		{
+			name:    "Per Machine CPU Minimum Above Inherited Default",
+			input:   executionstore.CreateProjectMachinePoolGrantInput{MinMachineCPU: &cpu8},
+			wantErr: "resolved project machine pool grant config: cpu is below min_machine_cpu",
+		},
+		{
+			name: "Per Machine CPU Minimum With Higher Project Default",
+			input: projectGrantInputWithDefaultMachineOverlayForTest(
+				executionstore.CreateProjectMachinePoolGrantInput{MinMachineCPU: &cpu8},
+				defaultMachineOverlayFieldsForTest{DefaultMachineCPU: &cpu8},
+			),
+			wantCreated: true,
+		},
+		{
 			name:        "No Default Machine Overlay",
 			input:       executionstore.CreateProjectMachinePoolGrantInput{},
 			wantCreated: true,
@@ -1148,6 +1317,50 @@ func TestCreateProjectMachinePoolGrantAppliesOnlyPerMachineLimitsToResolvedResou
 		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 			t.Fatalf("%s error = %v, want %q", tc.name, err, tc.wantErr)
 		}
+	}
+
+	agentGrant, err := store.Execution().CreateProjectMachinePoolGrant(ctx, projectGrantInputWithDefaultMachineOverlayForTest(
+		executionstore.CreateProjectMachinePoolGrantInput{
+			OrgID:          testOrgID,
+			ProjectID:      testProjectID,
+			MachinePoolID:  machinePool.ID,
+			MinMachineCPU:  &cpu8,
+			IdempotencyKey: "idem-agent-config-machine-minimum",
+		},
+		defaultMachineOverlayFieldsForTest{DefaultMachineCPU: &cpu8},
+	))
+	if err != nil {
+		t.Fatalf("create agent config minimum grant: %v", err)
+	}
+	compiled := mustCompileAgentYAMLWithMachineSourceResolvers(t, ctx, store, `
+name: Minimum CPU Agent
+instruction: Use the pool.
+model:
+  provider_config: openai-prod
+  name: gpt-test
+machine_sources:
+  - machine_pool_name: `+machinePool.Name+`
+    machine_cpu: 4
+tools:
+  run_command: {}
+`)
+	err = store.Execution().ValidateAgentConfigMachineSources(
+		ctx,
+		testProjectID,
+		json.RawMessage(compiled.CanonicalJSON),
+		agentconfig.CompilerVersion,
+		compiled.Hash,
+	)
+	if err == nil || !strings.Contains(err.Error(), "cpu is below min_machine_cpu") {
+		t.Fatalf("agent config minimum error = %v, want cpu minimum error", err)
+	}
+	if _, err := store.Execution().DeleteProjectMachinePoolGrant(
+		ctx,
+		testOrgID,
+		testProjectID,
+		agentGrant.ID,
+	); err != nil {
+		t.Fatalf("revoke agent config minimum grant: %v", err)
 	}
 }
 
@@ -1571,6 +1784,7 @@ tools:
 	); err != nil {
 		t.Fatalf("complete orphan pool machine provisioning: %v", err)
 	}
+	seedProviderRuntimeMismatchForTest(t, ctx, pool, machineID, orphan.ID)
 	archivedMachines, err := store.Execution().DeleteMachinePool(ctx, testOrgID, machinePool.ID)
 	if err != nil {
 		t.Fatalf("archive machine pool: %v", err)
@@ -1582,6 +1796,7 @@ tools:
 	if len(markedMachineIDs) != 2 || !markedMachineIDs[launch.MachineBindings[0].MachineID] || !markedMachineIDs[orphan.ID] {
 		t.Fatalf("archived machines = %+v", archivedMachines)
 	}
+	assertProviderRuntimeMismatchClearedForTest(t, ctx, pool, machineID, orphan.ID)
 	if _, err := store.Execution().GetMachinePool(ctx, testOrgID, machinePool.ID); !storeerr.IsNotFound(err) {
 		t.Fatalf("get archived machine pool error = %v, want not found", err)
 	}
@@ -1832,6 +2047,7 @@ tools:
 	) {
 		t.Fatalf("direct revoke of generated pool grant error = %v, want ErrStateTransitionConflict", err)
 	}
+	seedProviderRuntimeMismatchForTest(t, ctx, pool, launch.MachineBindings[0].MachineID)
 	revokedResult, err := store.Execution().DeleteProjectMachinePoolGrant(
 		ctx,
 		testOrgID,
@@ -1854,6 +2070,7 @@ tools:
 	if machine.LifecycleState != "deleting" || machine.LifecycleReasonCode != "pool_grant_revoked" {
 		t.Fatalf("machine after pool grant revoke = %+v", machine)
 	}
+	assertProviderRuntimeMismatchClearedForTest(t, ctx, pool, machine.ID)
 	if _, claimed, err := store.Execution().ClaimPoolMachineForProvisioning(
 		ctx,
 		testOrgID,
@@ -2691,6 +2908,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		DefaultMachineEnvOverlay: json.RawMessage(`{"KEEP":"yes"}`),
 		DefaultCwd:               "/before",
 		MaxTotalCPU:              intPtrForMachinePoolTest(8),
+		MinMachineCPU:            intPtrForMachinePoolTest(0),
 		MaxMachineCPU:            intPtrForMachinePoolTest(4),
 	})
 	if err != nil {
@@ -2718,6 +2936,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		!sameJSON(updated.DefaultMachineEnvOverlay, envOverlay) ||
 		updated.DefaultCwd != "/before" ||
 		updated.MaxTotalCPU != nil ||
+		updated.MinMachineCPU == nil || *updated.MinMachineCPU != 0 ||
 		updated.MaxMachineCPU == nil || *updated.MaxMachineCPU != 4 ||
 		updated.MachinePoolID != machinePool.ID {
 		t.Fatalf("updated grant patch mismatch: %+v", updated)
@@ -2729,8 +2948,21 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get updated grant: %v", err)
 	}
-	if fetched.Description != "after" || fetched.MaxTotalCPU != nil {
+	if fetched.Description != "after" || fetched.MaxTotalCPU != nil ||
+		fetched.MinMachineCPU == nil || *fetched.MinMachineCPU != 0 {
 		t.Fatalf("fetched grant did not persist patch: %+v", fetched)
+	}
+	cleared, err := store.Execution().UpdateProjectMachinePoolGrant(ctx, executionstore.UpdateProjectMachinePoolGrantInput{
+		OrgID:         testOrgID,
+		ProjectID:     testProjectID,
+		ID:            grant.ID,
+		MinMachineCPU: patch.NullableInt{Set: true},
+	})
+	if err != nil {
+		t.Fatalf("clear grant minimum: %v", err)
+	}
+	if cleared.MinMachineCPU != nil {
+		t.Fatalf("cleared grant minimum = %v, want nil", cleared.MinMachineCPU)
 	}
 
 	two := 2

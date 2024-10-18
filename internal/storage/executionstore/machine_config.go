@@ -24,7 +24,10 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 )
 
-const MaxResolvedEnvironmentBytes = 1024 * 1024
+const (
+	MaxResolvedEnvironmentBytes   = 1024 * 1024
+	MaxResolvedEnvironmentEntries = 4096
+)
 
 type MachinePoolResources struct {
 	CPU      int64
@@ -43,9 +46,10 @@ type MachineResourceFacts struct {
 }
 
 type MachinePoolProviderPolicy struct {
-	DefaultProvisioning MachineProvisioningConfig
-	ResourceLimits      MachineResourceLimits
-	ProviderConfig      json.RawMessage
+	DefaultProvisioning      MachineProvisioningConfig
+	ResourceLimits           MachineResourceLimits
+	ProviderConfig           json.RawMessage
+	RuntimeProtectionEnabled bool
 }
 
 type MachineProvisioningOverlay struct {
@@ -166,6 +170,8 @@ func (s *Store) resolvePoolMachineProvisioningConfig(
 		ResourceLimits: MachineResourceLimits{
 			MaxTotalCPU:        intPtrFromSQLC(poolGrant.PoolMaxTotalCpu),
 			MaxTotalMemoryMB:   intPtrFromSQLC(poolGrant.PoolMaxTotalMemoryMb),
+			MinMachineCPU:      intPtrFromSQLC(poolGrant.PoolMinMachineCpu),
+			MinMachineMemoryMB: intPtrFromSQLC(poolGrant.PoolMinMachineMemoryMb),
 			MaxMachineCPU:      intPtrFromSQLC(poolGrant.PoolMaxMachineCpu),
 			MaxMachineMemoryMB: intPtrFromSQLC(poolGrant.PoolMaxMachineMemoryMb),
 		},
@@ -243,35 +249,61 @@ func (s *Store) ResolveMachineProviderAuthToken(
 	providerAuthSecretID ID,
 	providerAuthEnvVar string,
 ) (string, error) {
+	credential, err := s.ResolveMachineProviderCredential(
+		ctx,
+		orgID,
+		managementKind,
+		providerAuthSecretID,
+		providerAuthEnvVar,
+	)
+	return credential.Token, err
+}
+
+type MachineProviderCredential struct {
+	Token     string
+	VersionID ID
+}
+
+func (s *Store) ResolveMachineProviderCredential(
+	ctx context.Context,
+	orgID ID,
+	managementKind management.Kind,
+	providerAuthSecretID ID,
+	providerAuthEnvVar string,
+) (MachineProviderCredential, error) {
 	switch managementKind {
 	case management.Tenant:
 		if isNilID(providerAuthSecretID) {
-			return "", errors.New("provider_auth_secret_id is required")
+			return MachineProviderCredential{}, errors.New("provider_auth_secret_id is required")
 		}
 		credential, err := s.secrets.ReadOrgOwnedSecretPayload(ctx, secretstore.ReadOrgOwnedSecretPayloadInput{
-			OrgID:    orgID,
-			SecretID: providerAuthSecretID,
-			Kind:     secretstore.SecretKindGeneric,
+			OrgID:          orgID,
+			SecretID:       providerAuthSecretID,
+			ManagementKind: management.Tenant,
+			Kind:           secretstore.SecretKindGeneric,
 		})
 		if err != nil {
 			if errors.Is(err, storeerr.ErrNotFound) {
-				return "", errors.New("machine pool provider auth secret is unavailable")
+				return MachineProviderCredential{}, errors.New("machine pool provider auth secret is unavailable")
 			}
-			return "", err
+			return MachineProviderCredential{}, err
 		}
 		token := strings.TrimSpace(credential.Payload[secrets.KeyValue])
 		if token == "" {
-			return "", errors.New("machine pool provider auth secret value is required")
+			return MachineProviderCredential{}, errors.New("machine pool provider auth secret value is required")
 		}
-		return token, nil
+		return MachineProviderCredential{Token: token, VersionID: credential.CurrentVersionID}, nil
 	case management.Cluster:
 		token := strings.TrimSpace(os.Getenv(providerAuthEnvVar))
 		if token == "" {
-			return "", fmt.Errorf("provider auth env var %s is required", providerAuthEnvVar)
+			return MachineProviderCredential{}, fmt.Errorf("provider auth env var %s is required", providerAuthEnvVar)
 		}
-		return token, nil
+		return MachineProviderCredential{Token: token}, nil
 	default:
-		return "", fmt.Errorf("machine pool management kind %q is invalid", managementKind)
+		return MachineProviderCredential{}, fmt.Errorf(
+			"machine pool management kind %q is invalid",
+			managementKind,
+		)
 	}
 }
 
@@ -287,10 +319,13 @@ func (s *Store) validatePoolDefaultsTx(
 	return storeerr.InvalidRequest(s.machinePoolProviders.ValidatePool(
 		input.Provider,
 		MachinePoolProviderPolicy{
-			DefaultProvisioning: defaults.Provisioning,
+			DefaultProvisioning:      defaults.Provisioning,
+			RuntimeProtectionEnabled: input.RuntimeProtectionEnabled,
 			ResourceLimits: MachineResourceLimits{
 				MaxTotalCPU:        input.MaxTotalCPU,
 				MaxTotalMemoryMB:   input.MaxTotalMemoryMB,
+				MinMachineCPU:      input.MinMachineCPU,
+				MinMachineMemoryMB: input.MinMachineMemoryMB,
 				MaxMachineCPU:      input.MaxMachineCPU,
 				MaxMachineMemoryMB: input.MaxMachineMemoryMB,
 			},
@@ -375,6 +410,9 @@ func validateMachineProvisioning(machineProvisioning MachineProvisioningConfig) 
 }
 
 func validateMachineEnvironment(environment MachineEnvironment) error {
+	if err := validateEnvironmentEntryCount(len(environment.Env), len(environment.SecretEnv)); err != nil {
+		return err
+	}
 	envNames, err := validateEnvNames("env", environment.Env)
 	if err != nil {
 		return err
@@ -402,11 +440,24 @@ func validateMachineEnvironment(environment MachineEnvironment) error {
 }
 
 func validateMachineEnvironmentOverlay(overlay MachineEnvironmentOverlay) error {
+	if err := validateEnvironmentEntryCount(len(overlay.Env), len(overlay.SecretEnv)); err != nil {
+		return err
+	}
 	if _, err := validateEnvNames("env", overlay.Env); err != nil {
 		return err
 	}
 	if _, err := validateEnvNames("secret_env", overlay.SecretEnv); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateEnvironmentEntryCount(envEntries, secretEnvEntries int) error {
+	if envEntries+secretEnvEntries > MaxResolvedEnvironmentEntries {
+		return fmt.Errorf(
+			"env and secret_env may contain at most %d entries combined",
+			MaxResolvedEnvironmentEntries,
+		)
 	}
 	return nil
 }
@@ -553,6 +604,17 @@ func machineProvisioningFromColumns(
 		return MachineProvisioningConfig{}, err
 	}
 	return machineProvisioning, nil
+}
+
+func effectiveMachineEnvironment(
+	machineEnv, machineSecretEnv json.RawMessage,
+	bindingOverlay MachineEnvironmentOverlay,
+) (MachineEnvironment, error) {
+	environment, err := MachineEnvironmentFromColumns(machineEnv, machineSecretEnv)
+	if err != nil {
+		return MachineEnvironment{}, err
+	}
+	return resolveMachineEnvironment(environment, bindingOverlay)
 }
 
 func MachineEnvironmentFromColumns(env, secretEnv json.RawMessage) (MachineEnvironment, error) {
@@ -710,17 +772,20 @@ func (s *Store) ResolveEnvironmentSecrets(
 	orgID, projectID ID,
 	envJSON, secretEnvJSON json.RawMessage,
 ) (map[string]string, error) {
-	var env map[string]string
-	if err := decodeMachineJSONField(envJSON, "env", &env); err != nil {
+	environment, err := MachineEnvironmentFromColumns(envJSON, secretEnvJSON)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", storeerr.ErrPermanentEnvironment, err)
 	}
-	var secretEnv map[string]string
-	if err := decodeMachineJSONField(secretEnvJSON, "secret_env", &secretEnv); err != nil {
-		return nil, fmt.Errorf("%w: %w", storeerr.ErrPermanentEnvironment, err)
-	}
-	if err := validateMachineEnvironment(MachineEnvironment{Env: env, SecretEnv: secretEnv}); err != nil {
-		return nil, fmt.Errorf("%w: %w", storeerr.ErrPermanentEnvironment, err)
-	}
+	return s.resolveEnvironmentSecrets(ctx, orgID, projectID, environment)
+}
+
+func (s *Store) resolveEnvironmentSecrets(
+	ctx context.Context,
+	orgID, projectID ID,
+	environment MachineEnvironment,
+) (map[string]string, error) {
+	env := maps.Clone(environment.Env)
+	secretEnv := environment.SecretEnv
 	if env == nil {
 		env = map[string]string{}
 	}
@@ -768,9 +833,10 @@ func (s *Store) readEnvironmentSecretPayload(
 ) (secretstore.SecretPayloadRecord, error) {
 	if isNilID(projectID) {
 		return s.secrets.ReadOrgOwnedSecretPayload(ctx, secretstore.ReadOrgOwnedSecretPayloadInput{
-			OrgID:    orgID,
-			SecretID: secretID,
-			Kind:     secretstore.SecretKindGeneric,
+			OrgID:          orgID,
+			SecretID:       secretID,
+			ManagementKind: management.Tenant,
+			Kind:           secretstore.SecretKindGeneric,
 		})
 	}
 	return s.secrets.ReadProjectAvailableSecretPayload(ctx, secretstore.ReadProjectAvailableSecretPayloadInput{
@@ -785,13 +851,15 @@ func (s *Store) ResolvePoolMachineProvisioningEnv(
 	ctx context.Context,
 	claim PoolMachineProvisioningClaim,
 ) (map[string]string, error) {
-	return s.ResolveEnvironmentSecrets(
-		ctx,
-		claim.Machine.OrgID,
-		claim.GrantProjectID,
+	environment, err := effectiveMachineEnvironment(
 		claim.Machine.Env,
 		claim.Machine.SecretEnv,
+		claim.BindingEnvironmentOverlay,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", storeerr.ErrPermanentEnvironment, err)
+	}
+	return s.resolveEnvironmentSecrets(ctx, claim.Machine.OrgID, claim.GrantProjectID, environment)
 }
 
 func resourcesFromMachineProvisioning(

@@ -18,6 +18,7 @@ type PoolMachineRecord struct {
 	Binding         AgentMachineBindingRecord `json:"binding"`
 	Machine         MachineRecord             `json:"machine"`
 	MachinePoolName string                    `json:"machine_pool_name"`
+	FailureReport   json.RawMessage           `json:"failure_report,omitempty"`
 }
 
 type MachinePoolSourceRecord struct {
@@ -817,9 +818,11 @@ func poolMachineRecordFromSQLC(row dbsqlc.SelectPoolMachinesRow) PoolMachineReco
 		row.LifecycleChangedAt,
 		row.LifecycleVersion,
 	)
+	machine.ConnectionStateReason = row.ConnectionStateReason
 	return PoolMachineRecord{
 		Binding:         binding,
 		Machine:         machine,
 		MachinePoolName: row.PoolName,
+		FailureReport:   rawMessageFromSQLCPtr(row.FailureReport),
 	}
 }

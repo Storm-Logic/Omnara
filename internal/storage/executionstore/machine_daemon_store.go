@@ -200,6 +200,24 @@ type MachineBootstrapRecord struct {
 	MachineID      ID
 }
 
+const (
+	MachineFailureStageStartupScript = "startup_script"
+	MachineFailureStageDaemonInstall = "daemon_install"
+	MachineFailureStageDaemonUpdate  = "daemon_update"
+)
+
+type MachineFailureReportInput struct {
+	OrgID           ID
+	MachineID       ID
+	DaemonTokenID   ID
+	Stage           string
+	ExitStatus      *int
+	OutputTail      []byte
+	OutputTruncated bool
+	DaemonVersion   string
+	TargetVersion   string
+}
+
 func (s *Store) CreateDaemonMachine(ctx context.Context, input CreateDaemonMachineInput) (MachineRecord, error) {
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	if isNilID(input.OrgID) || input.DisplayName == "" {

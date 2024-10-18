@@ -244,7 +244,7 @@ func inspectMachine(
 	); err != nil {
 		return nil, err
 	}
-	content, err := structuredToolResultContent(machineObservation(record))
+	content, err := structuredToolResultContent(machineInspection(record))
 	if err != nil {
 		return nil, err
 	}
@@ -441,6 +441,7 @@ type machineObservationPayload struct {
 	BindingState           string    `json:"binding_state"`
 	LifecycleState         string    `json:"lifecycle_state"`
 	ConnectionState        string    `json:"connection_state"`
+	ConnectionStateReason  string    `json:"connection_state_reason,omitempty"`
 	Description            string    `json:"description"`
 	Cwd                    string    `json:"cwd"`
 	Executable             bool      `json:"executable"`
@@ -452,6 +453,11 @@ type machineObservationPayload struct {
 
 type machineListResult struct {
 	Machines []machineObservationPayload `json:"machines"`
+}
+
+type machineInspectionPayload struct {
+	machineObservationPayload
+	FailureReport json.RawMessage `json:"failure_report,omitempty"`
 }
 
 type machineProvisioningAcceptedPayload struct {
@@ -497,6 +503,7 @@ func machineObservation(record executionstore.PoolMachineRecord) machineObservat
 		BindingState:           string(record.Binding.State),
 		LifecycleState:         string(record.Machine.LifecycleState),
 		ConnectionState:        string(record.Machine.ConnectionState),
+		ConnectionStateReason:  record.Machine.ConnectionStateReason,
 		Description:            record.Binding.Description,
 		Cwd:                    cwd,
 		Executable:             machineExecutable(record),
@@ -504,6 +511,13 @@ func machineObservation(record executionstore.PoolMachineRecord) machineObservat
 		LifecycleReasonMessage: record.Machine.LifecycleReasonMessage,
 		CreatedAt:              record.Binding.CreatedAt,
 		UpdatedAt:              record.Binding.UpdatedAt,
+	}
+}
+
+func machineInspection(record executionstore.PoolMachineRecord) machineInspectionPayload {
+	return machineInspectionPayload{
+		machineObservationPayload: machineObservation(record),
+		FailureReport:             record.FailureReport,
 	}
 }
 
@@ -519,7 +533,15 @@ func failMachineTransaction(
 	cause error,
 	retryable bool,
 ) (transactionalPhaseResult, error) {
-	content, err := machineToolFailureContent(code, cause.Error(), retryable)
+	return failMachineTransactionWithMessage(code, cause.Error(), cause, retryable)
+}
+
+func failMachineTransactionWithMessage(
+	code, message string,
+	cause error,
+	retryable bool,
+) (transactionalPhaseResult, error) {
+	content, err := machineToolFailureContent(code, message, retryable)
 	if err != nil {
 		return nil, fmt.Errorf("marshal machine tool failure: %w", err)
 	}
@@ -531,6 +553,14 @@ func failMachineTransactionForStorageError(
 	cause error,
 	retryable bool,
 ) (transactionalPhaseResult, error) {
+	if errors.Is(cause, storeerr.ErrManagedWorkAdmissionDenied) {
+		return failMachineTransactionWithMessage(
+			storeerr.ManagedWorkAdmissionDeniedCode,
+			managedWorkAdmissionDeniedMessage,
+			cause,
+			false,
+		)
+	}
 	if !errors.Is(cause, storeerr.ErrInvalidRequest) &&
 		!errors.Is(cause, storeerr.ErrNotFound) &&
 		!errors.Is(cause, storeerr.ErrStateTransitionConflict) {
