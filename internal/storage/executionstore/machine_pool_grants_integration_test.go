@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/publicid"
+	"github.com/omnara-ai/omnara/internal/resourcemeta"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
@@ -23,6 +24,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/patch"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
+	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 )
 
 func completeMachinePoolInputForTest(input executionstore.CreateMachinePoolInput) executionstore.CreateMachinePoolInput {
@@ -571,7 +573,7 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 			MinMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMinMachineMemoryMB},
 			MaxMachineCPU:        patch.NullableInt{Set: true, Value: &updatedMaxMachineCPU},
 			MaxMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMaxMachineMemoryMB},
-			Metadata:             json.RawMessage(`{"team":"infra"}`),
+			Metadata:             resourcemeta.Metadata{"team": "infra"},
 		},
 		defaultMachineUpdateFieldsForTest{
 			DefaultMachineCPU:             intPtrForMachinePoolTest(2),
@@ -829,7 +831,6 @@ func TestMachineConfigEnvRejectsReservedOmnaraNamespace(t *testing.T) {
 		t.Fatalf("create valid pool grant: %v", err)
 	}
 	compiled := mustCompileAgentYAMLWithMachineSourceResolvers(t, ctx, store, `
-name: Reserved Agent Env
 instruction: Use the pool.
 model:
   provider_config: openai-prod
@@ -1333,7 +1334,6 @@ func TestCreateProjectMachinePoolGrantAppliesOnlyPerMachineLimitsToResolvedResou
 		t.Fatalf("create agent config minimum grant: %v", err)
 	}
 	compiled := mustCompileAgentYAMLWithMachineSourceResolvers(t, ctx, store, `
-name: Minimum CPU Agent
 instruction: Use the pool.
 model:
   provider_config: openai-prod
@@ -1610,7 +1610,6 @@ func TestDeleteMachinePoolRevokesGrantsAndMarksMachinesDeleting(t *testing.T) {
 		t.Fatalf("create pool grant: %v", err)
 	}
 	agent := createLaunchTestAgent(t, ctx, store, "idem-pool-archive-agent", `
-name: Pool Archive Agent
 instruction: Use a pool machine.
 model:
   provider_config: openai-prod
@@ -1931,32 +1930,11 @@ func TestRevokeProjectMachinePoolGrantWaitsForMachinePoolLock(t *testing.T) {
 		)
 		revokeDone <- revokeErr
 	}()
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case revokeErr := <-revokeDone:
-			t.Fatalf("revoke completed before waiting on machine pool row lock: %v", revokeErr)
-		default:
-		}
-		var waiters int64
-		if err := pool.QueryRow(ctx, `
-SELECT count(*)
-FROM pg_stat_activity
-WHERE datname = current_database()
-  AND wait_event_type = 'Lock'
-  AND query ILIKE '%FROM machine_pools%'
-  AND query ILIKE '%FOR UPDATE%'
-`).Scan(&waiters); err != nil {
-			t.Fatalf("check machine pool row lock waiters: %v", err)
-		}
-		if waiters > 0 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for revoke to wait on machine pool row lock")
-		case <-time.After(10 * time.Millisecond):
-		}
+	integrationdb.WaitForLockWaiters(t, ctx, pool, "FROM machine_pools", 1)
+	select {
+	case revokeErr := <-revokeDone:
+		t.Fatalf("revoke completed before waiting on machine pool row lock: %v", revokeErr)
+	default:
 	}
 	if err := lockTx.Rollback(ctx); err != nil {
 		t.Fatalf("release machine pool row lock: %v", err)
@@ -2009,7 +1987,6 @@ func TestProjectMachinePoolGrantRevocationRevokesGeneratedGrantsAndRequestsMachi
 		t.Fatalf("create pool grant: %v", err)
 	}
 	agent := createLaunchTestAgent(t, ctx, store, "idem-pool-revoke-agent", `
-name: Pool Revoke Agent
 instruction: Use a agent pool machine.
 model:
   provider_config: openai-prod
@@ -2178,7 +2155,6 @@ func TestProjectMachinePoolGrantRevocationFencesInFlightProvisioning(t *testing.
 		t.Fatalf("create pool grant: %v", err)
 	}
 	agent := createLaunchTestAgent(t, ctx, store, "idem-pool-revoke-provisioning-agent", `
-name: Pool Revoke Provisioning Agent
 instruction: Use a agent pool machine.
 model:
   provider_config: openai-prod
@@ -2310,7 +2286,6 @@ func TestProjectMachinePoolGrantRevocationOverwritesProviderNotConfiguredReason(
 		t.Fatalf("create pool grant: %v", err)
 	}
 	agent := createLaunchTestAgent(t, ctx, store, "idem-pool-revoke-provider-not-configured-agent", `
-name: Pool Revoke Provider Not Configured Agent
 instruction: Use a pool machine with missing provider config.
 model:
   provider_config: openai-prod
@@ -2461,7 +2436,6 @@ func TestProjectMachinePoolGrantRevocationStopsActivePoolMachineExecution(t *tes
 		t.Fatalf("create pool grant: %v", err)
 	}
 	agent := createLaunchTestAgent(t, ctx, store, "idem-pool-revoke-active-agent", `
-name: Pool Revoke Active Agent
 instruction: Use an active pool machine.
 model:
   provider_config: openai-prod

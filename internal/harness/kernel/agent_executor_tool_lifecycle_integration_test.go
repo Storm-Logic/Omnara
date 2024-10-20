@@ -56,8 +56,7 @@ func TestAgentExecutorDefaultsSkillStoreForPromptAndExecution(t *testing.T) {
 		ctx,
 		"Kernel Skill Defaults",
 		"kernel-skill-defaults",
-		fmt.Sprintf(`name: Kernel Skill Defaults
-instruction: Use attached skills.
+		fmt.Sprintf(`instruction: Use attached skills.
 model:
   provider_config: openai-prod
   name: kernel-skill-defaults
@@ -285,7 +284,6 @@ WHERE call.project_id = $1
 		fixture,
 		work.AgentID,
 		executionstore.AgentWorkTool,
-		work.Now.Add(time.Second),
 	)
 	if claim.ProjectID != work.ProjectID ||
 		claim.AgentID != work.AgentID ||
@@ -760,7 +758,7 @@ func (f kernelFixture) kernelAgentConfigInput(
 	name, configuredModelName string,
 ) executionstore.CreateAgentConfigInput {
 	t.Helper()
-	sourceYAML := "name: " + name + "\ninstruction: Help the user make progress.\nmodel:\n  provider_config: openai-prod\n  name: " + configuredModelName + "\n"
+	sourceYAML := "instruction: Help the user make progress.\nmodel:\n  provider_config: openai-prod\n  name: " + configuredModelName + "\n"
 	compiled := f.compileAgentYAMLResolved(t, ctx, sourceYAML, f.Now)
 	return executionstore.CreateAgentConfigInput{
 		ProjectID:               kernelTestProjectID,
@@ -777,8 +775,7 @@ func (f kernelFixture) kernelAgentConfigInput(
 func TestAgentExecutorBlocksForCustomToolAndContinuesAfterResult(t *testing.T) {
 	ctx := context.Background()
 	fixture := newKernelFixture(t, ctx)
-	sourceYAML := `name: Kernel Custom Tool Test
-instruction: Use the custom tool when needed.
+	sourceYAML := `instruction: Use the custom tool when needed.
 model:
   provider_config: openai-prod
   name: kernel-test

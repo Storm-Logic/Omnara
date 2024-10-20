@@ -10,6 +10,7 @@ import (
 
 	"github.com/omnara-ai/omnara/internal/interactionform"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
+	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 )
 
 func TestArchiveAgentCancelsCurrentTurnOpenWork(t *testing.T) {
@@ -33,7 +34,6 @@ func TestArchiveAgentCancelsCurrentTurnOpenWork(t *testing.T) {
 		"archive-open-work",
 		"Archive Open Work",
 		`
-name: Archive Open Work
 instruction: Ask before continuing.
 model:
   provider_config: openai-prod
@@ -150,7 +150,7 @@ tools:
 		)
 		done <- archiveErr
 	}()
-	waitForDatabaseLockWait(t, ctx, store.pool, "FROM agents", blockingPID)
+	integrationdb.WaitForLockWaitBlockedBy(t, ctx, store.pool, "FROM agents", blockingPID)
 	var releaseFloor time.Time
 	if err := lockTx.QueryRow(ctx, `SELECT statement_timestamp()`).Scan(&releaseFloor); err != nil {
 		t.Fatalf("read archive lock release floor: %v", err)

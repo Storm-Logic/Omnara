@@ -2707,8 +2707,7 @@ func TestSlackEventsRejectsLaunchWhenLatestConfigCannotSendIntegrationMessage(
 	if err != nil {
 		t.Fatalf("encode current config id: %v", err)
 	}
-	sourceYAML := "name: slack-events-missing-send-tool Agent\n" +
-		"instruction: Help the user make progress.\n" +
+	sourceYAML := "instruction: Help the user make progress.\n" +
 		"model:\n" +
 		"  provider_config: openai-prod\n" +
 		"  name: gpt-test\n"
@@ -2859,6 +2858,13 @@ func TestSlackEventsSlowLookupsStillAcceptInput(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	pool := openIntegrationDB(t, ctx)
+	releaseSlowLookups := make(chan struct{})
+	blockUntilReleased := func(r *http.Request) {
+		select {
+		case <-releaseSlowLookups:
+		case <-r.Context().Done():
+		}
+	}
 	slackServer := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -2879,11 +2885,11 @@ func TestSlackEventsSlowLookupsStillAcceptInput(t *testing.T) {
 					t.Fatalf("parse users.info form: %v", err)
 				}
 				if r.Form.Get("user") != "U_BOT" {
-					time.Sleep(4 * time.Second)
+					blockUntilReleased(r)
 				}
 				writeSlackLookupTestResponse(t, w, r)
 			case "/conversations.info":
-				time.Sleep(4 * time.Second)
+				blockUntilReleased(r)
 				writeSlackLookupTestResponse(t, w, r)
 			case "/reactions.add":
 				writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -2893,6 +2899,7 @@ func TestSlackEventsSlowLookupsStillAcceptInput(t *testing.T) {
 		}),
 	)
 	defer slackServer.Close()
+	defer close(releaseSlowLookups)
 	fixture := newSlackEventsIntegrationFixture(
 		t,
 		ctx,

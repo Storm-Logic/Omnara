@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,7 +218,13 @@ type integrationHTTPHandler struct {
 }
 
 func (h *integrationHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.handler.ServeHTTP(w, r)
+	if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		h.handler.ServeHTTP(w, r)
+		return
+	}
+	recorder := &responseContractRecorder{ResponseWriter: w, request: r}
+	h.handler.ServeHTTP(recorder, r)
+	validateResponseContract(r, recorder)
 }
 
 func newIntegrationHTTPHandler(
@@ -458,8 +465,8 @@ func createdModelProviderConfig(t *testing.T, response map[string]any) map[strin
 	if !ok {
 		t.Fatalf("create model provider response has no config: %+v", response)
 	}
-	if _, ok := response["model_discovery"].(map[string]any); !ok {
-		t.Fatalf("create model provider response has no model_discovery: %+v", response)
+	if _, ok := response["model_catalog"].(map[string]any); !ok {
+		t.Fatalf("create model provider response has no model_catalog: %+v", response)
 	}
 	return config
 }
@@ -558,7 +565,7 @@ func createPublicHTTPAgent(
 	token string,
 ) map[string]any {
 	t.Helper()
-	sourceYAML := "name: " + seed + " Agent\ninstruction: Help the user make progress.\nmodel:\n  provider_config: openai-prod\n  name: gpt-test\n"
+	sourceYAML := "instruction: Help the user make progress (" + seed + ").\nmodel:\n  provider_config: openai-prod\n  name: gpt-test\n"
 	config := createPublicHTTPAgentConfig(t, handler, project, seed, "yaml", sourceYAML, token, http.StatusCreated)
 	return createPublicHTTPAgentProfile(
 		t,

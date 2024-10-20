@@ -22,6 +22,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/skillstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/omnara-ai/omnara/internal/testutil/integrationblob"
+	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 )
 
 type coordinatedSkillBlobStore struct {
@@ -309,7 +310,6 @@ func TestDeleteSkillBlockedWhileActiveAgentReferencesIt(t *testing.T) {
 		t.Fatalf("encode skill id: %v", err)
 	}
 	sourceYAML := `
-name: Skill Delete Agent
 instruction: test
 model:
   provider_config: openai-prod
@@ -623,7 +623,7 @@ func TestCreateSkillRevisionRechecksParentAfterLockWait(t *testing.T) {
 		})
 		done <- createErr
 	}()
-	waitForDatabaseLockWait(t, ctx, pool, "-- name: LockSkill", blockingPID)
+	integrationdb.WaitForLockWaitBlockedBy(t, ctx, pool, "-- name: LockSkill", blockingPID)
 	if _, err := blockingTx.Exec(
 		ctx,
 		`UPDATE skills SET deleted_at = statement_timestamp()
@@ -702,7 +702,7 @@ func TestCreateSkillRevisionTimestampFollowsRevisionLockOrder(t *testing.T) {
 		})
 		done <- createResult{record: record, err: createErr}
 	}()
-	waitForDatabaseLockWait(t, ctx, pool, "-- name: LockSkill", blockingPID)
+	integrationdb.WaitForLockWaitBlockedBy(t, ctx, pool, "-- name: LockSkill", blockingPID)
 	var lockReleaseFloor time.Time
 	if err := blockingTx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&lockReleaseFloor); err != nil {
 		t.Fatalf("read skill revision lock release floor: %v", err)
@@ -761,7 +761,7 @@ func TestDeleteSkillIncludesRevisionCommittedBeforeParentLock(t *testing.T) {
 			OrgID: testOrgID, SkillID: skill.ID, Actor: userPrincipal(admin.ID),
 		})
 	}()
-	waitForDatabaseLockWait(t, ctx, pool, "-- name: LockSkill", blockingPID)
+	integrationdb.WaitForLockWaitBlockedBy(t, ctx, pool, "-- name: LockSkill", blockingPID)
 	if _, err := blockingTx.Exec(
 		ctx,
 		`INSERT INTO skill_revisions(

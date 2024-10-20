@@ -23,6 +23,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/skillstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/omnara-ai/omnara/internal/testutil/integrationblob"
+	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 )
 
 func TestProjectResourceLimitSerializesConcurrentCreation(t *testing.T) {
@@ -391,7 +392,6 @@ WHERE id = $1
 		t.Fatalf("seed agent configs to limit: %v", err)
 	}
 	sourceYAML := `
-name: Limited Agent
 instruction: distinct config
 model:
   provider_config: openai-prod
@@ -521,7 +521,7 @@ func TestResourceLimitLocksDoNotBlockUnrelatedCreates(t *testing.T) {
 		})
 		skillResult <- err
 	}()
-	waitForNamedLockWaiters(t, ctx, pool, "LockResourceCreation", 1)
+	integrationdb.WaitForNamedLockWaiters(t, ctx, pool, "LockResourceCreation", 1)
 
 	tokenCtx, cancelToken := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelToken()

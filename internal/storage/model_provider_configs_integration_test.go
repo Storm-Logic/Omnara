@@ -12,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
 	"github.com/omnara-ai/omnara/internal/secrets"
@@ -22,6 +21,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/patch"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
+	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 )
 
 func TestModelProviderConfigStorageLifecycle(t *testing.T) {
@@ -638,8 +638,7 @@ func TestModelProviderConfigStorageLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create referenced configured model: %v", err)
 	}
-	referencedSource := `name: referenced-model
-instruction: Test referenced model mutability.
+	referencedSource := `instruction: Test referenced model mutability.
 model:
   provider_config: openai-referenced
   name: gpt-referenced
@@ -906,7 +905,6 @@ func TestDeleteConfiguredModelAllowsHistoricalAgentConfigReferences(t *testing.T
 	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 
 	sourceYAML := `
-name: archived model test
 instruction: test
 model:
   provider_config: openai-prod
@@ -957,7 +955,6 @@ func TestDeleteConfiguredModelDoesNotRequireActiveProviderConfig(t *testing.T) {
 	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
 
 	config := mustCreateAgentConfigFromYAML(t, ctx, store, "archive-model-parent-archived", `
-name: archived parent model test
 instruction: test
 model:
   provider_config: openai-prod
@@ -1046,8 +1043,7 @@ func TestConfiguredModelUpdateSerializesWithAgentConfigCreation(t *testing.T) {
 		t.Fatalf("grant lock-test configured model: %v", err)
 	}
 
-	source := `name: lock-test
-instruction: Test configured model lock.
+	source := `instruction: Test configured model lock.
 model:
   provider_config: openai-lock
   name: gpt-lock
@@ -1111,7 +1107,7 @@ DROP FUNCTION IF EXISTS test_pause_agent_config_insert();
 		createDone <- createErr
 	}()
 
-	waitForAdvisoryLockForModelProviderConfigTest(t, ctx, pool, 742001, 1)
+	integrationdb.WaitForGrantedAdvisoryLock(t, ctx, pool, 742001, 1)
 
 	updateDone := make(chan error, 1)
 	go func() {
@@ -1132,10 +1128,11 @@ DROP FUNCTION IF EXISTS test_pause_agent_config_insert();
 		updateDone <- updateErr
 	}()
 
+	integrationdb.WaitForNamedLockWaiters(t, ctx, pool, "LockConfiguredModelForMutation", 1)
 	select {
 	case updateErr := <-updateDone:
 		t.Fatalf("configured model update completed before agent config commit: %v", updateErr)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	if _, err := control.Exec(ctx, `SELECT pg_advisory_unlock(742001, 2)`); err != nil {
 		t.Fatalf("release agent config insert trigger: %v", err)
@@ -1210,8 +1207,7 @@ func TestCreateAgentConfigRejectsStaleToolRequirementAfterGrantChanges(t *testin
 		t.Fatalf("grant configured model with tools: %v", err)
 	}
 
-	source := `name: stale-tool-grant
-instruction: Test stale project grant tools.
+	source := `instruction: Test stale project grant tools.
 model:
   provider_config: openai-stale-grant
   name: gpt-stale-grant
@@ -1346,7 +1342,7 @@ DROP FUNCTION IF EXISTS test_pause_configured_model_revision_insert();
 		})
 		firstDone <- patchErr
 	}()
-	waitForAdvisoryLockForModelProviderConfigTest(t, ctx, pool, 742002, 1)
+	integrationdb.WaitForGrantedAdvisoryLock(t, ctx, pool, 742002, 1)
 
 	providerModelSlug := "gpt-patch-v2"
 	secondDone := make(chan error, 1)
@@ -1360,10 +1356,11 @@ DROP FUNCTION IF EXISTS test_pause_configured_model_revision_insert();
 		secondDone <- patchErr
 	}()
 
+	integrationdb.WaitForNamedLockWaiters(t, ctx, pool, "LockConfiguredModelForMutation", 1)
 	select {
 	case secondErr := <-secondDone:
 		t.Fatalf("second patch completed before first patch released row lock: %v", secondErr)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	if _, err := control.Exec(ctx, `SELECT pg_advisory_unlock(742002, 2)`); err != nil {
 		t.Fatalf("release configured model revision insert trigger: %v", err)
@@ -1471,7 +1468,7 @@ DROP FUNCTION IF EXISTS test_pause_model_provider_config_update();
 		})
 		firstDone <- patchErr
 	}()
-	waitForAdvisoryLockForModelProviderConfigTest(t, ctx, pool, 742004, 1)
+	integrationdb.WaitForGrantedAdvisoryLock(t, ctx, pool, 742004, 1)
 
 	endpointPath := "/custom-responses"
 	secondDone := make(chan error, 1)
@@ -1484,10 +1481,11 @@ DROP FUNCTION IF EXISTS test_pause_model_provider_config_update();
 		secondDone <- patchErr
 	}()
 
+	integrationdb.WaitForNamedLockWaiters(t, ctx, pool, "LockModelProviderConfigForMutation", 1)
 	select {
 	case secondErr := <-secondDone:
 		t.Fatalf("second provider config patch completed before first patch released row lock: %v", secondErr)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	if _, err := control.Exec(ctx, `SELECT pg_advisory_unlock(742004, 2)`); err != nil {
 		t.Fatalf("release provider config update trigger: %v", err)
@@ -1609,7 +1607,7 @@ DROP FUNCTION IF EXISTS test_pause_archive_race_revision_insert();
 		})
 		patchDone <- patchErr
 	}()
-	waitForAdvisoryLockForModelProviderConfigTest(t, ctx, pool, 742003, 1)
+	integrationdb.WaitForGrantedAdvisoryLock(t, ctx, pool, 742003, 1)
 
 	archiveDone := make(chan struct {
 		record modelstore.ConfiguredModelRecord
@@ -1623,10 +1621,11 @@ DROP FUNCTION IF EXISTS test_pause_archive_race_revision_insert();
 		}{record: record, err: archiveErr}
 	}()
 
+	integrationdb.WaitForNamedLockWaiters(t, ctx, pool, "LockConfiguredModelForDelete", 1)
 	select {
 	case result := <-archiveDone:
 		t.Fatalf("archive completed before patch released row lock: record=%+v err=%v", result.record, result.err)
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 	if _, err := control.Exec(ctx, `SELECT pg_advisory_unlock(742003, 2)`); err != nil {
 		t.Fatalf("release configured model archive trigger: %v", err)
@@ -1702,8 +1701,7 @@ func TestCreateAgentConfigUsesConfiguredModelAliasAfterRevisionUpdate(t *testing
 		t.Fatalf("grant stale-test configured model: %v", err)
 	}
 
-	source := `name: stale-test
-instruction: Test configured model alias after revision update.
+	source := `instruction: Test configured model alias after revision update.
 model:
   provider_config: openai-stale
   name: gpt-stale
@@ -1769,37 +1767,6 @@ func boolPtr(value bool) *bool {
 func isSQLCheckViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23514"
-}
-
-func waitForAdvisoryLockForModelProviderConfigTest(
-	t *testing.T,
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	classID, objectID int32,
-) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var locked bool
-		if err := pool.QueryRow(ctx, `
-SELECT EXISTS (
-  SELECT 1
-  FROM pg_locks
-  WHERE locktype = 'advisory'
-    AND classid = $1
-    AND objid = $2
-    AND granted
-)`, classID, objectID).Scan(&locked); err != nil {
-			t.Fatalf("query advisory lock: %v", err)
-		}
-		if locked {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for advisory lock (%d, %d)", classID, objectID)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func TestListProjectModelGrantsSearchSortAndEmbeddedModel(t *testing.T) {

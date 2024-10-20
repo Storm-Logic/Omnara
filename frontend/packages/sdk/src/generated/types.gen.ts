@@ -26,6 +26,16 @@ export type Error = {
 };
 
 /**
+ * Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
+ */
+export type ClientErrorCode = 'invalid_request' | 'validation_failed' | 'unauthorized' | 'forbidden' | 'csrf_check_failed' | 'not_found' | 'conflict' | 'idempotency_key_conflict' | 'state_transition_conflict' | 'pending_work' | 'not_wake_capable' | 'gone' | 'daemon_runtime_unregistered' | 'request_too_large' | 'unsupported_media_type' | 'unprocessable' | 'rate_limited';
+
+/**
+ * Stable error code carried by 5XX statuses. Subset of the Error code enum whose statuses are server errors.
+ */
+export type ServerErrorCode = 'internal_error' | 'upstream_error' | 'service_unavailable' | 'authentication_unavailable';
+
+/**
  * Lifecycle owner. Tenant-managed resources can be changed through tenant APIs; cluster-managed resources are installed by the control plane and are read-only through tenant lifecycle APIs.
  */
 export type ManagementKind = 'tenant' | 'cluster';
@@ -177,13 +187,13 @@ export type ModelProviderConfig = {
 
 export type CreateModelProviderConfigResponse = {
     config: ModelProviderConfig;
-    model_discovery: ModelDiscoveryResult;
+    model_catalog: ModelCatalog;
 };
 
 /**
- * Result of validating the configured credential and probing the provider's /models endpoint. A failed check does not affect the stored config; treat it as a warning that the base URL or API key may be invalid.
+ * The provider's model catalog, obtained by validating the configured credential and probing the provider's /models endpoint. A failed probe does not affect the stored config; treat it as a warning that the base URL or API key may be invalid.
  */
-export type ModelDiscoveryResult = {
+export type ModelCatalog = {
     status: 'ok' | 'failed';
     /**
      * Models advertised by the provider, newest first, filtered to text-output tool-calling models where the provider exposes enough metadata to tell. Present when status is ok.
@@ -690,10 +700,6 @@ export type ListSkillGrantsResponse = {
     next_cursor: string | null;
 };
 
-export type SecretPayload = {
-    [key: string]: string;
-};
-
 export type McpoAuthStartRequest = {
     owner: SecretOwnerInput;
     mcp_url: string;
@@ -702,9 +708,14 @@ export type McpoAuthStartRequest = {
     client_id?: string;
     client_secret?: string;
     scopes?: Array<string>;
-    metadata?: {
-        [key: string]: string;
-    };
+    metadata?: McpoAuthStartMetadata;
+};
+
+/**
+ * User-supplied metadata for the stored secret. A restriction of Metadata that leaves room for one reserved pair - Omnara sets mcp_url on the secret to the flow's MCP endpoint URL, so the key is reserved and at most 15 user pairs are accepted.
+ */
+export type McpoAuthStartMetadata = {
+    [key: string]: string;
 };
 
 export type McpoAuthStartResponse = {
@@ -899,6 +910,10 @@ export type ListAgentProfilesResponse = {
 export type CreateAgentRequest = {
     profile?: AgentProfileId;
     config: AgentConfigId;
+    /**
+     * Display name for the launched agent. Defaults to the profile name when launching from a profile.
+     */
+    name?: string;
     message?: string;
 };
 
@@ -906,6 +921,7 @@ export type Agent = {
     id: AgentId;
     org_id: OrganizationId;
     project_id: ProjectId;
+    agent_profile_id?: AgentProfileId;
     state: 'active' | 'archived';
     name: string;
     integration_target?: IntegrationTarget;
@@ -968,11 +984,9 @@ export type ModelStopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal'
 export type ModelOutputStopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal' | 'content_filter' | 'error';
 
 /**
- * String key-value metadata. Maximum 16 pairs, keys up to 64 characters, and values up to 512 characters. Keys beginning with `omnara_` are reserved for Omnara and may affect product behavior; use them only when intentionally invoking Omnara-defined behavior.
+ * Arbitrary key-value metadata. Maximum 16 pairs, keys up to 64 characters, values must be strings of up to 512 characters. Keys beginning with `omnara_` are reserved for Omnara and may affect product behavior; use them only when intentionally invoking Omnara-defined behavior.
  */
-export type ContentBlockMetadata = {
-    [key: string]: string;
-};
+export type ContentBlockMetadata = Metadata;
 
 export type TextContentBlock = {
     type: 'text';
@@ -1074,6 +1088,9 @@ export type AgentInput = {
     state: string;
     delivery_mode: AgentInputDeliveryMode;
     input_kind: AgentInputKind;
+    /**
+     * Actor this input is attributed to. Absent when the input has no actor attribution.
+     */
     actor_id?: ActorId;
     content_blocks?: Array<AgentInputContentBlock>;
     queued_at: Timestamp;
@@ -1134,13 +1151,33 @@ export type ToolInput = {
     [key: string]: unknown;
 };
 
+/**
+ * Arbitrary key-value metadata. Maximum 16 pairs, keys up to 64 characters, values must be strings of up to 512 characters.
+ */
+export type Metadata = {
+    [key: string]: string;
+};
+
+/**
+ * User-supplied metadata stored on a machine, provided directly or copied from the machine pool that provisions it. A restriction of Metadata that leaves room for one reserved pair - Omnara sets observed_platform on the machine to the platform reported by its daemon, so the key is reserved and at most 15 user pairs are accepted.
+ */
+export type MachineMetadata = {
+    [key: string]: string;
+};
+
 export type CreateAgentInputRequest = {
+    /**
+     * At most 20 inline media blocks per submission, each holding up to 10 MiB of decoded media and up to 24 MiB decoded across the submission. Non-media blocks may hold up to 1 MiB combined. The whole request body is capped at 48 MiB.
+     */
     content_blocks: Array<CreateAgentInputContentBlock>;
     delivery_mode?: CreateAgentInputDeliveryMode;
     /**
      * Only valid when delivery_mode is steering. When true, atomically cancels open interactions associated with the current turn's unfinished tool calls before creating the steering input. Their parent tool calls complete as canceled; the turn, runtime, and unrelated tool calls are preserved.
      */
     cancel_open_interactions?: boolean;
+    /**
+     * External actor to attribute this input to, upserted by (provider_tenant_id, provider_user_id) atomically with the input; a rejected request writes no actor. Only allowed for non-user principals; requests authenticated as a user must omit it and are attributed to the user's omnara actor. When a non-user request omits it, the input has no actor attribution.
+     */
     actor?: ExternalActorParams;
 };
 
@@ -1189,6 +1226,9 @@ export type SubmitToolCallResultRequest = {
      * Whether the custom tool call succeeded or failed.
      */
     outcome: 'succeeded' | 'failed';
+    /**
+     * At most 20 inline media blocks per submission, each holding up to 10 MiB of decoded media and up to 24 MiB decoded across the submission. Non-media blocks may hold up to 1 MiB combined. The whole request body is capped at 48 MiB.
+     */
     content_blocks: Array<SubmitToolResultContentBlock>;
 };
 
@@ -1216,15 +1256,27 @@ export type AgentInputEvent = {
     is_opening_event: boolean;
     sequence: AgentSequence;
     event_kind: 'agent_input';
+    /**
+     * Matches the input that produced this event, allowing clients to correlate an input submission with its durable timeline admission.
+     */
     agent_input_id: AgentInputId;
     input_kind: AgentInputKind;
+    /**
+     * Actor attributed to the input. Resolve details through the project actors endpoints.
+     */
     actor_id?: ActorId;
     /**
      * Echoes the Idempotency-Key of a content-input request so its sender can recognize the durable admission. Absent for other input kinds.
      */
     input_idempotency_key?: string;
     control_type?: AgentControlType;
+    /**
+     * Interaction answered by an interaction_response input.
+     */
     interaction_id?: AgentInteractionId;
+    /**
+     * Configuration selected by a config_change input.
+     */
     agent_config_id?: AgentConfigId;
     content_blocks: Array<AgentInputContentBlock>;
     created_at: Timestamp;
@@ -1298,6 +1350,9 @@ export type ModelOutputThinkingStreamBlock = {
 
 export type ModelOutputToolUseStreamBlock = {
     kind: 'tool_use';
+    /**
+     * Stable public ID shared with the eventual durable ToolCall when this is a tool_use block.
+     */
     tool_call_id: ToolCallId;
     tool_name: string;
 };
@@ -1312,31 +1367,31 @@ export type ModelOutputStreamBlock = ({
 
 export type ModelOutputBlockStartDelta = {
     kind: 'block_start';
-    block_index?: number;
+    block_index: number;
     block: ModelOutputStreamBlock;
 };
 
 export type ModelOutputTextDelta = {
     kind: 'text_delta';
-    block_index?: number;
+    block_index: number;
     delta: string;
 };
 
 export type ModelOutputThinkingDelta = {
     kind: 'thinking_delta';
-    block_index?: number;
+    block_index: number;
     delta: string;
 };
 
 export type ModelOutputToolArgumentsDelta = {
     kind: 'tool_arguments_delta';
-    block_index?: number;
+    block_index: number;
     delta: string;
 };
 
 export type ModelOutputBlockStopDelta = {
     kind: 'block_stop';
-    block_index?: number;
+    block_index: number;
 };
 
 export type ModelUsage = {
@@ -1382,10 +1437,22 @@ export type ModelOutputStreamDelta = ({
 export type ModelOutputDelta = {
     turn_id: AgentTurnId;
     model_call_context_id: ModelCallContextId;
+    /**
+     * Monotonic frame sequence within this model call context's preview stream, starting at 1. Delta frames carry no SSE id; gaps in seq mean dropped best-effort frames.
+     */
     seq: AgentSequence;
+    /**
+     * First provider stream event coalesced into this frame.
+     */
     source_seq_start: AgentSequence;
+    /**
+     * Last provider stream event coalesced into this frame.
+     */
     source_seq_end: AgentSequence;
-    coalesced_count?: AgentCount;
+    /**
+     * Number of provider stream events coalesced into this frame. A frame is intact only when this equals source_seq_end - source_seq_start + 1; a smaller count means events inside the range were dropped before coalescing.
+     */
+    coalesced_count: AgentCount;
     event: ModelOutputStreamDelta;
 };
 
@@ -1396,6 +1463,9 @@ export type AgentEventStreamData = AgentEvent | ModelOutputDelta | Error;
 
 export type ListAgentEventsResponse = {
     data: Array<AgentEvent>;
+    /**
+     * Sequence to pass as after_sequence on the next request. Equals the request boundary when no events are returned.
+     */
     next_after_sequence: AgentSequenceCursor;
     /**
      * Sequence to pass as before_sequence for the next older page. Null when no older events remain or when paginating forward.
@@ -1436,6 +1506,9 @@ export type ListAgentTurnsResponse = {
 };
 
 export type CancelAgentRequest = {
+    /**
+     * External actor to attribute this cancelation to, upserted by (provider_tenant_id, provider_user_id) atomically with the cancelation; a rejected request writes no actor. Only allowed for non-user principals; requests authenticated as a user must omit it and are attributed to the user's omnara actor.
+     */
     actor?: ExternalActorParams;
 };
 
@@ -1449,6 +1522,9 @@ export type CancelAgentResponse = {
      * Whether this request changed any cancelable work.
      */
     affected: boolean;
+    /**
+     * Actor the cancelation was attributed to. Absent when the request had no actor attribution.
+     */
     actor_id?: ActorId;
 };
 
@@ -1522,6 +1598,9 @@ export type AgentInteractionState = 'open' | 'resolved' | 'canceled';
 
 export type ResolveAgentInteractionRequest = {
     answers: Array<InteractionAnswer>;
+    /**
+     * External actor to attribute to the generated interaction_response agent input, upserted by (provider_tenant_id, provider_user_id) atomically with the resolution; a rejected request writes no actor. Only allowed for non-user principals; requests authenticated as a user must omit it and are attributed to the user's omnara actor. When a non-user request omits it, the generated input has no actor attribution.
+     */
     actor?: ExternalActorParams;
 };
 
@@ -1534,6 +1613,9 @@ export type AgentInteraction = {
     state: AgentInteractionState;
     request: InteractionForm;
     resolution?: InteractionResolution;
+    /**
+     * The agent input that resolved the interaction — the submitted response, the content input that superseded it, or the cancel control input. Absent on open interactions and on system resolutions such as prompt delivery failure. The input's actor_id attributes the resolution.
+     */
     resolved_by_input_id?: AgentInputId;
     created_at: Timestamp;
     resolved_at?: Timestamp;
@@ -1552,9 +1634,7 @@ export type Actor = {
     provider_tenant_id?: string;
     provider_user_id: string;
     display_name?: string;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
 };
@@ -1566,12 +1646,7 @@ export type ExternalActorParams = {
     provider_tenant_id?: string;
     provider_user_id: string;
     display_name?: string;
-    /**
-     * Arbitrary key-value metadata. Maximum 16 pairs, keys up to 64 characters, values must be strings of up to 512 characters.
-     */
-    metadata?: {
-        [key: string]: string;
-    };
+    metadata?: Metadata;
 };
 
 export type ListActorsResponse = {
@@ -1677,17 +1752,13 @@ export type SecretMaterial = ({
 export type CreateSecretRequest = {
     owner: SecretOwnerInput;
     name: string;
-    metadata?: {
-        [key: string]: string;
-    };
+    metadata?: Metadata;
     material: SecretMaterial;
 };
 
 export type UpdateSecretRequest = {
     name?: string;
-    metadata?: {
-        [key: string]: string;
-    };
+    metadata?: Metadata;
 };
 
 export type SecretVersionRequest = {
@@ -1707,9 +1778,7 @@ export type Secret = {
     owner: SecretOwner;
     name: string;
     kind: SecretKind;
-    metadata: {
-        [key: string]: string;
-    };
+    metadata: Metadata;
     current_version_number: number;
     payload_keys: Array<string>;
     created_at: Timestamp;
@@ -1944,9 +2013,7 @@ export type CreateMachinePoolRequestBase = {
     min_machine_memory_mb?: number;
     max_machine_cpu?: number;
     max_machine_memory_mb?: number;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: MachineMetadata;
 };
 
 export type UpdateMachinePoolRequest = {
@@ -1985,9 +2052,7 @@ export type UpdateMachinePoolRequest = {
     min_machine_memory_mb?: number | null;
     max_machine_cpu?: number | null;
     max_machine_memory_mb?: number | null;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: MachineMetadata;
 };
 
 export type MachinePool = {
@@ -2030,9 +2095,7 @@ export type MachinePool = {
     min_machine_memory_mb: number | null;
     max_machine_cpu: number | null;
     max_machine_memory_mb: number | null;
-    metadata: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
 };
@@ -2076,9 +2139,7 @@ export type Machine = {
     next_reconcile_after: Timestamp | null;
     provision_attempts: number;
     delete_attempts: number;
-    metadata: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     deleted_at: Timestamp | null;
     created_at: Timestamp;
     updated_at: Timestamp;
@@ -2094,9 +2155,7 @@ export type CreateMachineRequest = {
     secret_env?: {
         [key: string]: SecretId;
     };
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: MachineMetadata;
 };
 
 export type UpdateMachineRequest = {
@@ -2109,7 +2168,10 @@ export type UpdateMachineRequest = {
     };
 };
 
-export type MachineSummary = {
+/**
+ * Shared machine fields composed into machine response schemas. Composing schemas close their final shape with unevaluatedProperties.
+ */
+export type MachineSummaryFields = {
     id: MachineId;
     org_id: OrganizationId;
     source_kind: MachineSourceKind;
@@ -2124,6 +2186,8 @@ export type MachineSummary = {
     updated_at: Timestamp;
 };
 
+export type MachineSummary = MachineSummaryFields;
+
 export type MachineAccessSource = {
     kind: MachineAccessSourceKind;
     project_id?: ProjectId;
@@ -2136,7 +2200,7 @@ export type MachineAccess = {
     sources: Array<MachineAccessSource>;
 };
 
-export type VisibleMachine = MachineSummary & {
+export type VisibleMachine = MachineSummaryFields & {
     access: MachineAccess;
 };
 
@@ -2153,9 +2217,7 @@ export type ProjectMachineGrant = {
     source_kind: ProjectMachineGrantSourceKind;
     project_machine_pool_grant_id?: ProjectMachinePoolGrantId | null;
     description: string;
-    metadata: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
 };
@@ -2163,9 +2225,7 @@ export type ProjectMachineGrant = {
 export type CreateProjectMachineGrantRequest = {
     machine_id: MachineId;
     description?: string;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: Metadata;
 };
 
 export type CreateProjectMachineGrantResponse = {
@@ -2214,9 +2274,7 @@ export type ProjectMachinePoolGrant = {
     min_machine_memory_mb: number | null;
     max_machine_cpu: number | null;
     max_machine_memory_mb: number | null;
-    metadata: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
 };
@@ -2249,9 +2307,7 @@ export type CreateProjectMachinePoolGrantRequest = {
     min_machine_memory_mb?: number;
     max_machine_cpu?: number;
     max_machine_memory_mb?: number;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: Metadata;
 };
 
 /**
@@ -2278,9 +2334,7 @@ export type UpdateProjectMachinePoolGrantRequest = {
     min_machine_memory_mb?: number | null;
     max_machine_cpu?: number | null;
     max_machine_memory_mb?: number | null;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: Metadata;
 };
 
 export type ListProjectMachinePoolGrantsResponse = {
@@ -2306,9 +2360,7 @@ export type MachinePoolSummary = {
 
 export type CreateMachineDaemonTokenRequest = {
     name?: string;
-    metadata?: {
-        [key: string]: unknown;
-    };
+    metadata?: Metadata;
 };
 
 export type MachineDaemonToken = {
@@ -2316,9 +2368,7 @@ export type MachineDaemonToken = {
     org_id: OrganizationId;
     machine_id: MachineId;
     name: string;
-    metadata: {
-        [key: string]: unknown;
-    };
+    metadata: Metadata;
     created_at: Timestamp;
     last_used_at: Timestamp | null;
     revoked_at: Timestamp | null;
@@ -2374,9 +2424,6 @@ export type RegisterDaemonRuntimeRequest = {
     capacity?: {
         [key: string]: unknown;
     };
-    metadata?: {
-        [key: string]: unknown;
-    };
     observed_platform?: {
         [key: string]: unknown;
     };
@@ -2422,13 +2469,18 @@ export type CreateProjectRequest = {
     name: string;
 };
 
-export type Project = {
+/**
+ * Shared project fields composed into project response schemas. Composing schemas close their final shape with unevaluatedProperties.
+ */
+export type ProjectFields = {
     id: ProjectId;
     org_id: OrganizationId;
     name: string;
     created_at: Timestamp;
     updated_at: Timestamp;
 };
+
+export type Project = ProjectFields;
 
 export type ProjectAccess = {
     can_read: boolean;
@@ -2437,7 +2489,7 @@ export type ProjectAccess = {
     can_operate: boolean;
 };
 
-export type VisibleProject = Project & {
+export type VisibleProject = ProjectFields & {
     access: ProjectAccess;
 };
 
@@ -2634,6 +2686,26 @@ export type ListPersonalAccessTokensErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListPersonalAccessTokensError = ListPersonalAccessTokensErrors[keyof ListPersonalAccessTokensErrors];
@@ -2679,6 +2751,26 @@ export type CreatePersonalAccessTokenErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreatePersonalAccessTokenError = CreatePersonalAccessTokenErrors[keyof CreatePersonalAccessTokenErrors];
@@ -2722,6 +2814,26 @@ export type RevokePersonalAccessTokenErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RevokePersonalAccessTokenError = RevokePersonalAccessTokenErrors[keyof RevokePersonalAccessTokenErrors];
@@ -2763,6 +2875,26 @@ export type BootstrapDaemonErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type BootstrapDaemonError = BootstrapDaemonErrors[keyof BootstrapDaemonErrors];
@@ -2780,7 +2912,7 @@ export type RecordMachineFailureData = {
     body?: string;
     path?: never;
     query: {
-        stage: 'startup_script' | 'daemon_install' | 'daemon_update';
+        stage: 'startup_script' | 'daemon_install' | 'daemon_update' | 'daemon_uninstall' | 'daemon_uninstalled';
         exit_status?: number;
         capture_status?: number;
         daemon_version?: string;
@@ -2802,6 +2934,26 @@ export type RecordMachineFailureErrors = {
      * The authenticated principal is not authorized.
      */
     403: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RecordMachineFailureError = RecordMachineFailureErrors[keyof RecordMachineFailureErrors];
@@ -2853,6 +3005,26 @@ export type CreateOrganizationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateOrganizationError = CreateOrganizationErrors[keyof CreateOrganizationErrors];
@@ -2904,6 +3076,26 @@ export type DeleteOrganizationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteOrganizationError = DeleteOrganizationErrors[keyof DeleteOrganizationErrors];
@@ -2949,6 +3141,26 @@ export type DeleteCurrentUserErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteCurrentUserError = DeleteCurrentUserErrors[keyof DeleteCurrentUserErrors];
@@ -2986,6 +3198,26 @@ export type GetCurrentUserErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetCurrentUserError = GetCurrentUserErrors[keyof GetCurrentUserErrors];
@@ -3040,6 +3272,26 @@ export type ListPendingInvitationsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListPendingInvitationsError = ListPendingInvitationsErrors[keyof ListPendingInvitationsErrors];
@@ -3087,6 +3339,26 @@ export type AcceptInvitationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type AcceptInvitationError = AcceptInvitationErrors[keyof AcceptInvitationErrors];
@@ -3134,6 +3406,26 @@ export type DeclineInvitationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeclineInvitationError = DeclineInvitationErrors[keyof DeclineInvitationErrors];
@@ -3190,6 +3482,26 @@ export type ListVisibleProjectsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListVisibleProjectsError = ListVisibleProjectsErrors[keyof ListVisibleProjectsErrors];
@@ -3243,6 +3555,26 @@ export type CreateProjectErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateProjectError = CreateProjectErrors[keyof CreateProjectErrors];
@@ -3295,6 +3627,26 @@ export type DeleteProjectErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteProjectError = DeleteProjectErrors[keyof DeleteProjectErrors];
@@ -3352,6 +3704,26 @@ export type ListOrgMembersErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListOrgMembersError = ListOrgMembersErrors[keyof ListOrgMembersErrors];
@@ -3400,6 +3772,26 @@ export type RemoveOrgMemberErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RemoveOrgMemberError = RemoveOrgMemberErrors[keyof RemoveOrgMemberErrors];
@@ -3448,6 +3840,26 @@ export type UpdateOrgMemberErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateOrgMemberError = UpdateOrgMemberErrors[keyof UpdateOrgMemberErrors];
@@ -3492,6 +3904,26 @@ export type ListMemberProjectAccessErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListMemberProjectAccessError = ListMemberProjectAccessErrors[keyof ListMemberProjectAccessErrors];
@@ -3537,6 +3969,26 @@ export type RemoveMemberProjectAccessErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RemoveMemberProjectAccessError = RemoveMemberProjectAccessErrors[keyof RemoveMemberProjectAccessErrors];
@@ -3586,6 +4038,26 @@ export type SetMemberProjectAccessErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type SetMemberProjectAccessError = SetMemberProjectAccessErrors[keyof SetMemberProjectAccessErrors];
@@ -3638,6 +4110,26 @@ export type ListOrgApiKeysErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListOrgApiKeysError = ListOrgApiKeysErrors[keyof ListOrgApiKeysErrors];
@@ -3685,6 +4177,26 @@ export type CreateOrgApiKeyErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateOrgApiKeyError = CreateOrgApiKeyErrors[keyof CreateOrgApiKeyErrors];
@@ -3729,6 +4241,26 @@ export type GetOrgApiKeyErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetOrgApiKeyError = GetOrgApiKeyErrors[keyof GetOrgApiKeyErrors];
@@ -3777,6 +4309,26 @@ export type UpdateOrgApiKeyErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateOrgApiKeyError = UpdateOrgApiKeyErrors[keyof UpdateOrgApiKeyErrors];
@@ -3821,6 +4373,26 @@ export type RevokeOrgApiKeyErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RevokeOrgApiKeyError = RevokeOrgApiKeyErrors[keyof RevokeOrgApiKeyErrors];
@@ -3865,6 +4437,26 @@ export type ListOrgApiKeyProjectAccessErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListOrgApiKeyProjectAccessError = ListOrgApiKeyProjectAccessErrors[keyof ListOrgApiKeyProjectAccessErrors];
@@ -3914,6 +4506,26 @@ export type RemoveOrgApiKeyProjectRoleErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RemoveOrgApiKeyProjectRoleError = RemoveOrgApiKeyProjectRoleErrors[keyof RemoveOrgApiKeyProjectRoleErrors];
@@ -3963,6 +4575,26 @@ export type SetOrgApiKeyProjectRoleErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type SetOrgApiKeyProjectRoleError = SetOrgApiKeyProjectRoleErrors[keyof SetOrgApiKeyProjectRoleErrors];
@@ -4019,6 +4651,26 @@ export type ListOrgInvitationsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListOrgInvitationsError = ListOrgInvitationsErrors[keyof ListOrgInvitationsErrors];
@@ -4066,6 +4718,26 @@ export type CreateOrgInvitationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateOrgInvitationError = CreateOrgInvitationErrors[keyof CreateOrgInvitationErrors];
@@ -4114,6 +4786,26 @@ export type DeleteOrgInvitationErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteOrgInvitationError = DeleteOrgInvitationErrors[keyof DeleteOrgInvitationErrors];
@@ -4183,6 +4875,26 @@ export type ListSkillsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListSkillsError = ListSkillsErrors[keyof ListSkillsErrors];
@@ -4238,6 +4950,26 @@ export type CreateSkillErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSkillError = CreateSkillErrors[keyof CreateSkillErrors];
@@ -4290,6 +5022,26 @@ export type DeleteSkillErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteSkillError = DeleteSkillErrors[keyof DeleteSkillErrors];
@@ -4338,6 +5090,26 @@ export type GetSkillErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetSkillError = GetSkillErrors[keyof GetSkillErrors];
@@ -4400,6 +5172,26 @@ export type ListSkillGrantsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListSkillGrantsError = ListSkillGrantsErrors[keyof ListSkillGrantsErrors];
@@ -4452,6 +5244,26 @@ export type CreateSkillGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSkillGrantError = CreateSkillGrantErrors[keyof CreateSkillGrantErrors];
@@ -4501,6 +5313,26 @@ export type DeleteSkillGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteSkillGrantError = DeleteSkillGrantErrors[keyof DeleteSkillGrantErrors];
@@ -4571,6 +5403,26 @@ export type ListProjectAvailableSkillsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListProjectAvailableSkillsError = ListProjectAvailableSkillsErrors[keyof ListProjectAvailableSkillsErrors];
@@ -4646,6 +5498,26 @@ export type ListSecretsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListSecretsError = ListSecretsErrors[keyof ListSecretsErrors];
@@ -4697,6 +5569,26 @@ export type CreateSecretErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSecretError = CreateSecretErrors[keyof CreateSecretErrors];
@@ -4756,6 +5648,26 @@ export type StartSecretMcpoAuthErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type StartSecretMcpoAuthError = StartSecretMcpoAuthErrors[keyof StartSecretMcpoAuthErrors];
@@ -4808,6 +5720,26 @@ export type DeleteSecretErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteSecretError = DeleteSecretErrors[keyof DeleteSecretErrors];
@@ -4856,6 +5788,26 @@ export type GetSecretErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetSecretError = GetSecretErrors[keyof GetSecretErrors];
@@ -4908,6 +5860,26 @@ export type UpdateSecretErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateSecretError = UpdateSecretErrors[keyof UpdateSecretErrors];
@@ -4960,6 +5932,26 @@ export type CreateSecretVersionErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSecretVersionError = CreateSecretVersionErrors[keyof CreateSecretVersionErrors];
@@ -5022,6 +6014,26 @@ export type ListSecretGrantsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListSecretGrantsError = ListSecretGrantsErrors[keyof ListSecretGrantsErrors];
@@ -5074,6 +6086,26 @@ export type CreateSecretGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSecretGrantError = CreateSecretGrantErrors[keyof CreateSecretGrantErrors];
@@ -5123,6 +6155,26 @@ export type DeleteSecretGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteSecretGrantError = DeleteSecretGrantErrors[keyof DeleteSecretGrantErrors];
@@ -5185,6 +6237,26 @@ export type ListIntegrationInstallsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListIntegrationInstallsError = ListIntegrationInstallsErrors[keyof ListIntegrationInstallsErrors];
@@ -5230,6 +6302,26 @@ export type DeleteIntegrationInstallErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteIntegrationInstallError = DeleteIntegrationInstallErrors[keyof DeleteIntegrationInstallErrors];
@@ -5278,6 +6370,26 @@ export type CreateAgentConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateAgentConfigError = CreateAgentConfigErrors[keyof CreateAgentConfigErrors];
@@ -5315,6 +6427,26 @@ export type GetToolCatalogErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetToolCatalogError = GetToolCatalogErrors[keyof GetToolCatalogErrors];
@@ -5364,6 +6496,26 @@ export type GetAgentConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetAgentConfigError = GetAgentConfigErrors[keyof GetAgentConfigErrors];
@@ -5422,6 +6574,26 @@ export type ListAgentProfilesErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListAgentProfilesError = ListAgentProfilesErrors[keyof ListAgentProfilesErrors];
@@ -5476,6 +6648,26 @@ export type CreateAgentProfileErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateAgentProfileError = CreateAgentProfileErrors[keyof CreateAgentProfileErrors];
@@ -5529,6 +6721,26 @@ export type DeleteAgentProfileErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteAgentProfileError = DeleteAgentProfileErrors[keyof DeleteAgentProfileErrors];
@@ -5578,6 +6790,26 @@ export type GetAgentProfileErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetAgentProfileError = GetAgentProfileErrors[keyof GetAgentProfileErrors];
@@ -5633,6 +6865,26 @@ export type UpdateAgentProfileErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateAgentProfileError = UpdateAgentProfileErrors[keyof UpdateAgentProfileErrors];
@@ -5682,6 +6934,26 @@ export type CreateIntegrationOAuthSetupErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateIntegrationOAuthSetupError = CreateIntegrationOAuthSetupErrors[keyof CreateIntegrationOAuthSetupErrors];
@@ -5731,6 +7003,26 @@ export type CreateSlackSetupErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateSlackSetupError = CreateSlackSetupErrors[keyof CreateSlackSetupErrors];
@@ -5755,6 +7047,10 @@ export type ListAgentsData = {
          * Case-insensitive glob over the list's logical name. `*` matches zero or more characters, `?` matches one character, and `\` escapes a wildcard.
          */
         name?: string;
+        /**
+         * Return only agents launched from this agent profile.
+         */
+        agent_profile_id?: AgentProfileId;
         sort?: ResourceListSort;
         /**
          * Maximum number of items to return in one page.
@@ -5789,6 +7085,26 @@ export type ListAgentsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListAgentsError = ListAgentsErrors[keyof ListAgentsErrors];
@@ -5843,6 +7159,26 @@ export type CreateAgentErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateAgentError = CreateAgentErrors[keyof CreateAgentErrors];
@@ -5896,6 +7232,26 @@ export type GetAgentErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetAgentError = GetAgentErrors[keyof GetAgentErrors];
@@ -5941,6 +7297,26 @@ export type ArchiveAgentErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ArchiveAgentError = ArchiveAgentErrors[keyof ArchiveAgentErrors];
@@ -5996,6 +7372,26 @@ export type UpdateAgentConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateAgentConfigError = UpdateAgentConfigErrors[keyof UpdateAgentConfigErrors];
@@ -6051,6 +7447,26 @@ export type CreateAgentInputErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateAgentInputError = CreateAgentInputErrors[keyof CreateAgentInputErrors];
@@ -6111,6 +7527,26 @@ export type ListToolCallsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListToolCallsError = ListToolCallsErrors[keyof ListToolCallsErrors];
@@ -6161,6 +7597,26 @@ export type SubmitToolCallResultErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type SubmitToolCallResultError = SubmitToolCallResultErrors[keyof SubmitToolCallResultErrors];
@@ -6215,6 +7671,26 @@ export type ListTurnsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListTurnsError = ListTurnsErrors[keyof ListTurnsErrors];
@@ -6270,6 +7746,26 @@ export type ListTurnEventsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListTurnEventsError = ListTurnEventsErrors[keyof ListTurnEventsErrors];
@@ -6328,6 +7824,26 @@ export type ListEventsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListEventsError = ListEventsErrors[keyof ListEventsErrors];
@@ -6382,13 +7898,33 @@ export type StreamEventsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type StreamEventsError = StreamEventsErrors[keyof StreamEventsErrors];
 
 export type StreamEventsResponses = {
     /**
-     * Server-sent event stream. Durable frames use `agent_input`, `model_output`, or `tool_result` as the SSE event name; best-effort model previews use `model_output_delta`; terminal stream errors use `error`. Heartbeats are SSE comments and carry no JSON payload.
+     * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort model previews use `model_output_delta` and terminal stream errors use `error`; neither carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
      */
     200: AgentEventStreamData;
 };
@@ -6431,6 +7967,26 @@ export type CancelAgentErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CancelAgentError = CancelAgentErrors[keyof CancelAgentErrors];
@@ -6490,6 +8046,26 @@ export type ListAgentInteractionsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListAgentInteractionsError = ListAgentInteractionsErrors[keyof ListAgentInteractionsErrors];
@@ -6540,6 +8116,26 @@ export type ResolveAgentInteractionErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ResolveAgentInteractionError = ResolveAgentInteractionErrors[keyof ResolveAgentInteractionErrors];
@@ -6598,6 +8194,26 @@ export type ListQueuedBacklogInputsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListQueuedBacklogInputsError = ListQueuedBacklogInputsErrors[keyof ListQueuedBacklogInputsErrors];
@@ -6648,6 +8264,26 @@ export type CancelQueuedBacklogInputErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CancelQueuedBacklogInputError = CancelQueuedBacklogInputErrors[keyof CancelQueuedBacklogInputErrors];
@@ -6698,6 +8334,26 @@ export type MoveQueuedBacklogInputErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type MoveQueuedBacklogInputError = MoveQueuedBacklogInputErrors[keyof MoveQueuedBacklogInputErrors];
@@ -6748,6 +8404,26 @@ export type PromoteQueuedInputToSteeringErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type PromoteQueuedInputToSteeringError = PromoteQueuedInputToSteeringErrors[keyof PromoteQueuedInputToSteeringErrors];
@@ -6798,6 +8474,26 @@ export type DemoteSteeringInputToQueuedErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DemoteSteeringInputToQueuedError = DemoteSteeringInputToQueuedErrors[keyof DemoteSteeringInputToQueuedErrors];
@@ -6848,6 +8544,26 @@ export type GetArtifactErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetArtifactError = GetArtifactErrors[keyof GetArtifactErrors];
@@ -6898,13 +8614,33 @@ export type GetArtifactContentErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetArtifactContentError = GetArtifactContentErrors[keyof GetArtifactContentErrors];
 
 export type GetArtifactContentResponses = {
     /**
-     * Artifact bytes.
+     * Artifact bytes, served with the artifact's stored content type.
      */
     200: Blob | File;
 };
@@ -6964,6 +8700,26 @@ export type ListVisibleProjectMachinesErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListVisibleProjectMachinesError = ListVisibleProjectMachinesErrors[keyof ListVisibleProjectMachinesErrors];
@@ -7026,6 +8782,26 @@ export type ListProjectMachineGrantsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListProjectMachineGrantsError = ListProjectMachineGrantsErrors[keyof ListProjectMachineGrantsErrors];
@@ -7080,6 +8856,26 @@ export type CreateProjectMachineGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateProjectMachineGrantError = CreateProjectMachineGrantErrors[keyof CreateProjectMachineGrantErrors];
@@ -7133,6 +8929,26 @@ export type DeleteProjectMachineGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteProjectMachineGrantError = DeleteProjectMachineGrantErrors[keyof DeleteProjectMachineGrantErrors];
@@ -7209,6 +9025,26 @@ export type ListProjectAvailableSecretsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListProjectAvailableSecretsError = ListProjectAvailableSecretsErrors[keyof ListProjectAvailableSecretsErrors];
@@ -7258,6 +9094,26 @@ export type GetProjectAvailableSecretErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetProjectAvailableSecretError = GetProjectAvailableSecretErrors[keyof GetProjectAvailableSecretErrors];
@@ -7318,6 +9174,26 @@ export type ListActorsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListActorsError = ListActorsErrors[keyof ListActorsErrors];
@@ -7366,6 +9242,26 @@ export type PutActorErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type PutActorError = PutActorErrors[keyof PutActorErrors];
@@ -7415,6 +9311,26 @@ export type GetActorErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetActorError = GetActorErrors[keyof GetActorErrors];
@@ -7480,6 +9396,26 @@ export type ListVisibleMachinesErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListVisibleMachinesError = ListVisibleMachinesErrors[keyof ListVisibleMachinesErrors];
@@ -7533,6 +9469,26 @@ export type CreateMachineErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateMachineError = CreateMachineErrors[keyof CreateMachineErrors];
@@ -7581,6 +9537,26 @@ export type DeleteMachineErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteMachineError = DeleteMachineErrors[keyof DeleteMachineErrors];
@@ -7629,6 +9605,26 @@ export type GetMachineErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetMachineError = GetMachineErrors[keyof GetMachineErrors];
@@ -7677,6 +9673,26 @@ export type UpdateMachineErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateMachineError = UpdateMachineErrors[keyof UpdateMachineErrors];
@@ -7738,6 +9754,26 @@ export type ListModelProviderConfigsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListModelProviderConfigsError = ListModelProviderConfigsErrors[keyof ListModelProviderConfigsErrors];
@@ -7785,6 +9821,26 @@ export type CreateModelProviderConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateModelProviderConfigError = CreateModelProviderConfigErrors[keyof CreateModelProviderConfigErrors];
@@ -7837,6 +9893,26 @@ export type DeleteModelProviderConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteModelProviderConfigError = DeleteModelProviderConfigErrors[keyof DeleteModelProviderConfigErrors];
@@ -7885,6 +9961,26 @@ export type GetModelProviderConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetModelProviderConfigError = GetModelProviderConfigErrors[keyof GetModelProviderConfigErrors];
@@ -7933,6 +10029,26 @@ export type UpdateModelProviderConfigErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateModelProviderConfigError = UpdateModelProviderConfigErrors[keyof UpdateModelProviderConfigErrors];
@@ -7945,6 +10061,74 @@ export type UpdateModelProviderConfigResponses = {
 };
 
 export type UpdateModelProviderConfigResponse = UpdateModelProviderConfigResponses[keyof UpdateModelProviderConfigResponses];
+
+export type GetModelCatalogData = {
+    body?: never;
+    path: {
+        orgID: OrganizationId;
+        modelProviderConfigID: ModelProviderConfigId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/model-provider-configs/{modelProviderConfigID}/model-catalog';
+};
+
+export type GetModelCatalogErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current resource state or idempotency history.
+     */
+    409: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type GetModelCatalogError = GetModelCatalogErrors[keyof GetModelCatalogErrors];
+
+export type GetModelCatalogResponses = {
+    /**
+     * Route response.
+     */
+    200: ModelCatalog;
+};
+
+export type GetModelCatalogResponse = GetModelCatalogResponses[keyof GetModelCatalogResponses];
 
 export type ListConfiguredModelsData = {
     body?: never;
@@ -7990,6 +10174,26 @@ export type ListConfiguredModelsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListConfiguredModelsError = ListConfiguredModelsErrors[keyof ListConfiguredModelsErrors];
@@ -8038,6 +10242,26 @@ export type CreateConfiguredModelErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateConfiguredModelError = CreateConfiguredModelErrors[keyof CreateConfiguredModelErrors];
@@ -8091,6 +10315,26 @@ export type DeleteConfiguredModelErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteConfiguredModelError = DeleteConfiguredModelErrors[keyof DeleteConfiguredModelErrors];
@@ -8140,6 +10384,26 @@ export type UpdateConfiguredModelErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateConfiguredModelError = UpdateConfiguredModelErrors[keyof UpdateConfiguredModelErrors];
@@ -8202,6 +10466,26 @@ export type ListProjectModelGrantsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListProjectModelGrantsError = ListProjectModelGrantsErrors[keyof ListProjectModelGrantsErrors];
@@ -8250,6 +10534,26 @@ export type CreateProjectModelGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateProjectModelGrantError = CreateProjectModelGrantErrors[keyof CreateProjectModelGrantErrors];
@@ -8303,6 +10607,26 @@ export type DeleteProjectModelGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteProjectModelGrantError = DeleteProjectModelGrantErrors[keyof DeleteProjectModelGrantErrors];
@@ -8352,6 +10676,26 @@ export type UpdateProjectModelGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateProjectModelGrantError = UpdateProjectModelGrantErrors[keyof UpdateProjectModelGrantErrors];
@@ -8413,6 +10757,26 @@ export type ListMachinePoolsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListMachinePoolsError = ListMachinePoolsErrors[keyof ListMachinePoolsErrors];
@@ -8460,6 +10824,26 @@ export type CreateMachinePoolErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateMachinePoolError = CreateMachinePoolErrors[keyof CreateMachinePoolErrors];
@@ -8512,6 +10896,26 @@ export type DeleteMachinePoolErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteMachinePoolError = DeleteMachinePoolErrors[keyof DeleteMachinePoolErrors];
@@ -8560,6 +10964,26 @@ export type GetMachinePoolErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetMachinePoolError = GetMachinePoolErrors[keyof GetMachinePoolErrors];
@@ -8608,6 +11032,26 @@ export type UpdateMachinePoolErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateMachinePoolError = UpdateMachinePoolErrors[keyof UpdateMachinePoolErrors];
@@ -8670,6 +11114,26 @@ export type ListProjectMachinePoolGrantsErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListProjectMachinePoolGrantsError = ListProjectMachinePoolGrantsErrors[keyof ListProjectMachinePoolGrantsErrors];
@@ -8724,6 +11188,26 @@ export type CreateProjectMachinePoolGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateProjectMachinePoolGrantError = CreateProjectMachinePoolGrantErrors[keyof CreateProjectMachinePoolGrantErrors];
@@ -8777,6 +11261,26 @@ export type DeleteProjectMachinePoolGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type DeleteProjectMachinePoolGrantError = DeleteProjectMachinePoolGrantErrors[keyof DeleteProjectMachinePoolGrantErrors];
@@ -8826,6 +11330,26 @@ export type GetProjectMachinePoolGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetProjectMachinePoolGrantError = GetProjectMachinePoolGrantErrors[keyof GetProjectMachinePoolGrantErrors];
@@ -8875,6 +11399,26 @@ export type UpdateProjectMachinePoolGrantErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type UpdateProjectMachinePoolGrantError = UpdateProjectMachinePoolGrantErrors[keyof UpdateProjectMachinePoolGrantErrors];
@@ -8932,6 +11476,26 @@ export type ListByoMachineDaemonTokensErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type ListByoMachineDaemonTokensError = ListByoMachineDaemonTokensErrors[keyof ListByoMachineDaemonTokensErrors];
@@ -8980,6 +11544,26 @@ export type CreateByoMachineDaemonTokenErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type CreateByoMachineDaemonTokenError = CreateByoMachineDaemonTokenErrors[keyof CreateByoMachineDaemonTokenErrors];
@@ -9029,6 +11613,26 @@ export type RevokeMachineDaemonTokenErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RevokeMachineDaemonTokenError = RevokeMachineDaemonTokenErrors[keyof RevokeMachineDaemonTokenErrors];
@@ -9078,6 +11682,26 @@ export type RegisterMachineDaemonRuntimeErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type RegisterMachineDaemonRuntimeError = RegisterMachineDaemonRuntimeErrors[keyof RegisterMachineDaemonRuntimeErrors];
@@ -9129,6 +11753,26 @@ export type SocketMachineDaemonRuntimeErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type SocketMachineDaemonRuntimeError = SocketMachineDaemonRuntimeErrors[keyof SocketMachineDaemonRuntimeErrors];
@@ -9171,6 +11815,26 @@ export type EndMachineDaemonRuntimeErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type EndMachineDaemonRuntimeError = EndMachineDaemonRuntimeErrors[keyof EndMachineDaemonRuntimeErrors];
@@ -9222,6 +11886,26 @@ export type SleepMachineDaemonRuntimeErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type SleepMachineDaemonRuntimeError = SleepMachineDaemonRuntimeErrors[keyof SleepMachineDaemonRuntimeErrors];
@@ -9269,6 +11953,26 @@ export type GetDaemonSkillArchiveErrors = {
      * The service dependency required to satisfy the request is unavailable.
      */
     503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
 };
 
 export type GetDaemonSkillArchiveError = GetDaemonSkillArchiveErrors[keyof GetDaemonSkillArchiveErrors];
