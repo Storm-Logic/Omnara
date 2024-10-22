@@ -90,7 +90,9 @@ export type ModelApiFormat = 'openai-responses' | 'openai-chat-completions' | 'a
 
 export type ModelProviderAuthKind = 'bearer_token' | 'api_key_header';
 
-export type ModelProviderApiVariant = 'default' | 'openrouter';
+export type ModelProviderApiVariant = 'default' | 'openrouter' | 'bedrock';
+
+export type ModelProviderApiVariantResponse = string;
 
 /**
  * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, and selected reasoning policy. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
@@ -166,7 +168,7 @@ export type ModelProviderConfig = {
     management_kind: ManagementKind;
     name: string;
     api_format: ModelApiFormat;
-    api_variant: ModelProviderApiVariant;
+    api_variant: ModelProviderApiVariantResponse;
     /**
      * Provider endpoint base URL. Normal API mode uses public HTTPS endpoints; localhost and loopback endpoints are only for insecure dev-mode configs.
      */
@@ -842,7 +844,7 @@ export type AgentConfigModel = {
     configured_model_id: ConfiguredModelId;
     current_revision_id: ConfiguredModelRevisionId;
     api_format: ModelApiFormat;
-    api_variant: ModelProviderApiVariant;
+    api_variant: ModelProviderApiVariantResponse;
     /**
      * Effective token window after configured-model, project-grant, and agent-config settings are applied.
      */
@@ -1216,6 +1218,14 @@ export type ToolCall = {
     created_at: Timestamp;
 };
 
+/**
+ * An ephemeral notification that a tool call entered a lifecycle state.
+ */
+export type ToolCallUpdate = {
+    tool_call_id: ToolCallId;
+    state: ToolCallState;
+};
+
 export type ListToolCallsResponse = {
     data: Array<ToolCall>;
     next_cursor: string | null;
@@ -1457,9 +1467,9 @@ export type ModelOutputDelta = {
 };
 
 /**
- * One JSON payload from the event stream: an authoritative durable event, a best-effort model-output preview, or a terminal stream error.
+ * One JSON payload from the event stream: an authoritative durable event, a best-effort tool-call update, a best-effort model-output preview, or a terminal stream error.
  */
-export type AgentEventStreamData = AgentEvent | ModelOutputDelta | Error;
+export type AgentEventStreamData = AgentEvent | ToolCallUpdate | ModelOutputDelta | Error;
 
 export type ListAgentEventsResponse = {
     data: Array<AgentEvent>;
@@ -1888,6 +1898,9 @@ export type PersonalAccessToken = {
     id: PersonalAccessTokenId;
     user_id: UserId;
     name: string;
+    /**
+     * Stable non-secret display identifier. It is not embedded in the bearer token.
+     */
     token_id: string;
     created_at: Timestamp;
     last_used_at: Timestamp | null;
@@ -1895,6 +1908,9 @@ export type PersonalAccessToken = {
 };
 
 export type CreatePersonalAccessTokenResponse = {
+    /**
+     * Opaque bearer credential.
+     */
     token: string;
     token_record: PersonalAccessToken;
 };
@@ -1908,6 +1924,9 @@ export type OrgApiKey = {
     id: OrgApiKeyId;
     org_id: OrganizationId;
     name: string;
+    /**
+     * Stable non-secret display identifier. It is not embedded in the bearer token.
+     */
     token_id: string;
     /**
      * The key's org role (admin or member). Empty for revoked keys.
@@ -1926,6 +1945,9 @@ export type CreateOrgApiKeyRequest = {
 };
 
 export type CreateOrgApiKeyResponse = {
+    /**
+     * Opaque bearer credential.
+     */
     token: string;
     api_key: OrgApiKey;
 };
@@ -2158,6 +2180,21 @@ export type CreateMachineRequest = {
     metadata?: MachineMetadata;
 };
 
+export type ConnectByoMachineRequest = {
+    display_name: string;
+    project_ids: Array<ProjectId>;
+};
+
+export type ConnectByoMachineResponse = {
+    machine: Machine;
+    /**
+     * Opaque bearer credential.
+     */
+    token: string;
+    token_record: MachineDaemonToken;
+    project_grants: Array<ProjectMachineGrant>;
+};
+
 export type UpdateMachineRequest = {
     cwd?: string;
     env?: {
@@ -2376,6 +2413,9 @@ export type MachineDaemonToken = {
 };
 
 export type CreateMachineDaemonTokenResponse = {
+    /**
+     * Opaque bearer credential.
+     */
     token: string;
     token_record: MachineDaemonToken;
 };
@@ -2501,6 +2541,21 @@ export type ListProjectsResponse = {
     next_cursor: string | null;
 };
 
+export type OrgOverviewResponse = {
+    /**
+     * Projects visible to the caller, newest first (capped).
+     */
+    projects: Array<VisibleProject>;
+    /**
+     * Most recently active agents across the caller's readable projects, ordered by updated_at descending.
+     */
+    recent_agents: Array<Agent>;
+    /**
+     * Most recently updated agent profiles across the caller's readable projects, ordered by updated_at descending.
+     */
+    recent_agent_profiles: Array<AgentProfile>;
+};
+
 export type CurrentUserIdentity = {
     id: UserId;
     /**
@@ -2617,6 +2672,11 @@ export type MachineSourceKindFilter = MachineSourceKind;
 export type SecretMetadataFilter = {
     [key: string]: string;
 };
+
+/**
+ * Filter secrets by material kind.
+ */
+export type SecretKindFilter = SecretKind;
 
 /**
  * Filter by the immutable skill owner kind.
@@ -3438,6 +3498,65 @@ export type DeclineInvitationResponses = {
 };
 
 export type DeclineInvitationResponse = DeclineInvitationResponses[keyof DeclineInvitationResponses];
+
+export type GetOrgOverviewData = {
+    body?: never;
+    path: {
+        orgID: OrganizationId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/overview';
+};
+
+export type GetOrgOverviewErrors = {
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type GetOrgOverviewError = GetOrgOverviewErrors[keyof GetOrgOverviewErrors];
+
+export type GetOrgOverviewResponses = {
+    /**
+     * Overview data for the organization.
+     */
+    200: OrgOverviewResponse;
+};
+
+export type GetOrgOverviewResponse = GetOrgOverviewResponses[keyof GetOrgOverviewResponses];
 
 export type ListVisibleProjectsData = {
     body?: never;
@@ -5446,6 +5565,10 @@ export type ListSecretsData = {
          * Case-insensitive glob over the list's logical name. `*` matches zero or more characters, `?` matches one character, and `\` escapes a wildcard.
          */
         name?: string;
+        /**
+         * Filter secrets by material kind.
+         */
+        kind?: SecretKind;
         /**
          * Filter by the immutable owner kind.
          */
@@ -7924,7 +8047,7 @@ export type StreamEventsError = StreamEventsErrors[keyof StreamEventsErrors];
 
 export type StreamEventsResponses = {
     /**
-     * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort model previews use `model_output_delta` and terminal stream errors use `error`; neither carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
+     * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort tool lifecycle updates use `tool_call_update`, model previews use `model_output_delta`, and terminal stream errors use `error`; none carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
      */
     200: AgentEventStreamData;
 };
@@ -8974,6 +9097,10 @@ export type ListProjectAvailableSecretsData = {
          */
         name?: string;
         /**
+         * Filter secrets by material kind.
+         */
+        kind?: SecretKind;
+        /**
          * Filter by the immutable owner kind.
          */
         owner_kind?: 'org' | 'project' | 'user';
@@ -9505,6 +9632,77 @@ export type CreateMachineResponses = {
 };
 
 export type CreateMachineResponse = CreateMachineResponses[keyof CreateMachineResponses];
+
+export type ConnectByoMachineData = {
+    body: ConnectByoMachineRequest;
+    path: {
+        orgID: OrganizationId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/machines/connect';
+};
+
+export type ConnectByoMachineErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current resource state or idempotency history.
+     */
+    409: Error;
+    /**
+     * An unexpected internal server error occurred.
+     */
+    500: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type ConnectByoMachineError = ConnectByoMachineErrors[keyof ConnectByoMachineErrors];
+
+export type ConnectByoMachineResponses = {
+    /**
+     * Machine, daemon token, and selected project grants created.
+     */
+    201: ConnectByoMachineResponse;
+};
+
+export type ConnectByoMachineResponse2 = ConnectByoMachineResponses[keyof ConnectByoMachineResponses];
 
 export type DeleteMachineData = {
     body?: never;

@@ -144,7 +144,13 @@ export const zModelApiFormat = z.enum([
 
 export const zModelProviderAuthKind = z.enum(['bearer_token', 'api_key_header']);
 
-export const zModelProviderApiVariant = z.enum(['default', 'openrouter']);
+export const zModelProviderApiVariant = z.enum([
+    'default',
+    'openrouter',
+    'bedrock'
+]);
+
+export const zModelProviderApiVariantResponse = z.string();
 
 /**
  * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, and selected reasoning policy. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
@@ -318,7 +324,7 @@ export const zModelProviderConfig = z.object({
     management_kind: zManagementKind,
     name: z.string(),
     api_format: zModelApiFormat,
-    api_variant: zModelProviderApiVariant,
+    api_variant: zModelProviderApiVariantResponse,
     base_url: z.string(),
     endpoint_path: z.string(),
     request_timeout_ms: z.int(),
@@ -627,7 +633,7 @@ export const zAgentConfigModel = z.object({
     configured_model_id: zConfiguredModelId,
     current_revision_id: zConfiguredModelRevisionId,
     api_format: zModelApiFormat,
-    api_variant: zModelProviderApiVariant,
+    api_variant: zModelProviderApiVariantResponse,
     context_window_tokens: z.int(),
     max_output_tokens: z.int(),
     default_max_output_tokens: z.int().nullish(),
@@ -992,6 +998,14 @@ export const zToolCall = z.object({
     created_at: zTimestamp
 });
 
+/**
+ * An ephemeral notification that a tool call entered a lifecycle state.
+ */
+export const zToolCallUpdate = z.object({
+    tool_call_id: zToolCallId,
+    state: zToolCallState
+});
+
 export const zListToolCallsResponse = z.object({
     data: z.array(zToolCall),
     next_cursor: z.string().nullable()
@@ -1186,10 +1200,11 @@ export const zModelOutputDelta = z.object({
 });
 
 /**
- * One JSON payload from the event stream: an authoritative durable event, a best-effort model-output preview, or a terminal stream error.
+ * One JSON payload from the event stream: an authoritative durable event, a best-effort tool-call update, a best-effort model-output preview, or a terminal stream error.
  */
 export const zAgentEventStreamData = z.union([
     zAgentEvent,
+    zToolCallUpdate,
     zModelOutputDelta,
     zError
 ]);
@@ -1584,7 +1599,7 @@ export const zPersonalAccessToken = z.object({
 });
 
 export const zCreatePersonalAccessTokenResponse = z.object({
-    token: z.string().regex(/^omnara_pat_[^_]+_[^_]+$/),
+    token: z.string().min(1),
     token_record: zPersonalAccessToken
 });
 
@@ -1612,7 +1627,7 @@ export const zCreateOrgApiKeyRequest = z.object({
 });
 
 export const zCreateOrgApiKeyResponse = z.object({
-    token: z.string().regex(/^omnara_org_[^_]+_[^_]+$/),
+    token: z.string().min(1),
     api_key: zOrgApiKey
 });
 
@@ -1795,6 +1810,11 @@ export const zCreateMachineRequest = z.object({
     env: z.record(z.string(), z.string()).optional(),
     secret_env: z.record(z.string(), zSecretId).optional(),
     metadata: zMachineMetadata.optional()
+});
+
+export const zConnectByoMachineRequest = z.object({
+    display_name: z.string().min(1),
+    project_ids: z.array(zProjectId).max(100)
 });
 
 export const zUpdateMachineRequest = z.object({
@@ -1980,8 +2000,15 @@ export const zMachineDaemonToken = z.object({
     revoke_reason: z.string()
 });
 
+export const zConnectByoMachineResponse = z.object({
+    machine: zMachine,
+    token: z.string().min(1),
+    token_record: zMachineDaemonToken,
+    project_grants: z.array(zProjectMachineGrant)
+});
+
 export const zCreateMachineDaemonTokenResponse = z.object({
-    token: z.string(),
+    token: z.string().min(1),
     token_record: zMachineDaemonToken
 });
 
@@ -2147,6 +2174,12 @@ export const zListProjectsResponse = z.object({
     next_cursor: z.string().nullable()
 });
 
+export const zOrgOverviewResponse = z.object({
+    projects: z.array(zVisibleProject),
+    recent_agents: z.array(zAgent),
+    recent_agent_profiles: z.array(zAgentProfile)
+});
+
 export const zCurrentUserIdentity = z.object({
     id: zUserId,
     email: z.string(),
@@ -2231,6 +2264,11 @@ export const zMachineSourceKindFilter = zMachineSourceKind;
  * Metadata key/value filters, encoded as metadata[key]=value.
  */
 export const zSecretMetadataFilter = z.record(z.string(), z.string());
+
+/**
+ * Filter secrets by material kind.
+ */
+export const zSecretKindFilter = zSecretKind;
 
 /**
  * Filter by the immutable skill owner kind.
@@ -2334,6 +2372,11 @@ export const zAcceptInvitationResponse = zOrgInvitation;
  * The declined invitation; declining consumes it.
  */
 export const zDeclineInvitationResponse = zOrgInvitation;
+
+/**
+ * Overview data for the organization.
+ */
+export const zGetOrgOverviewResponse = zOrgOverviewResponse;
 
 /**
  * Projects visible to the authenticated user.
@@ -2641,7 +2684,7 @@ export const zListTurnEventsResponse2 = zListTurnEventsResponse;
 export const zListEventsResponse = zListAgentEventsResponse;
 
 /**
- * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort model previews use `model_output_delta` and terminal stream errors use `error`; neither carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
+ * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort tool lifecycle updates use `tool_call_update`, model previews use `model_output_delta`, and terminal stream errors use `error`; none carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
  */
 export const zStreamEventsResponse = zAgentEventStreamData;
 
@@ -2749,6 +2792,11 @@ export const zListVisibleMachinesResponse2 = zListVisibleMachinesResponse;
  * Existing machine returned.
  */
 export const zCreateMachineResponse = zMachine;
+
+/**
+ * Machine, daemon token, and selected project grants created.
+ */
+export const zConnectByoMachineResponse2 = zConnectByoMachineResponse;
 
 /**
  * Resource deleted.

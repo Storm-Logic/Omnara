@@ -274,6 +274,7 @@ func newIntegrationServerWithStoreOptions(
 		[]Option{
 			WithSecretKeyWrapper(keyWrapper),
 			WithAgentEventWakeupSubscriber(noopAgentNotificationSubscriber{}),
+			WithAgentToolCallUpdateSubscriber(noopAgentNotificationSubscriber{}),
 			WithAgentStreamDeltaSubscriber(noopAgentNotificationSubscriber{}),
 			WithModelDiscoverer(func(
 				context.Context,
@@ -334,6 +335,7 @@ func mustNewServer(t testing.TB, store *storage.Store, opts ...Option) *Server {
 	serverOpts := append(
 		[]Option{
 			WithAgentEventWakeupSubscriber(noopAgentNotificationSubscriber{}),
+			WithAgentToolCallUpdateSubscriber(noopAgentNotificationSubscriber{}),
 			WithAgentStreamDeltaSubscriber(noopAgentNotificationSubscriber{}),
 		},
 		opts...,
@@ -401,9 +403,8 @@ func bootstrapPublicHTTPProject(
 	adminPAT, err := store.Identity().CreatePersonalAccessTokenWithPlaintext(
 		context.Background(),
 		identitystore.CreatePersonalAccessTokenInput{
-			UserID:  admin.ID,
-			Name:    "test owner",
-			TokenID: seed + "-admin",
+			UserID: admin.ID,
+			Name:   "test owner",
 		},
 	)
 	if err != nil {

@@ -65,6 +65,7 @@ const (
 	operationBootstrapDaemon               operationID = "BootstrapDaemon"
 	operationCancelAgent                   operationID = "CancelAgent"
 	operationCancelQueuedBacklogInput      operationID = "CancelQueuedBacklogInput"
+	operationConnectBYOMachine             operationID = "ConnectBYOMachine"
 	operationCreateAgent                   operationID = "CreateAgent"
 	operationCreateAgentConfig             operationID = "CreateAgentConfig"
 	operationCreateAgentInput              operationID = "CreateAgentInput"
@@ -124,6 +125,7 @@ const (
 	operationGetDaemonSkillArchive         operationID = "GetDaemonSkillArchive"
 	operationGetMachine                    operationID = "GetMachine"
 	operationGetOrgAPIKey                  operationID = "GetOrgAPIKey"
+	operationGetOrgOverview                operationID = "GetOrgOverview"
 	operationGetMachinePool                operationID = "GetMachinePool"
 	operationGetModelCatalog               operationID = "GetModelCatalog"
 	operationGetModelProviderConfig        operationID = "GetModelProviderConfig"
@@ -257,6 +259,7 @@ var openAPIOperationPolicies = map[operationID]operationPolicy{
 	operationRemoveOrgMember:            accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationListMemberProjectAccess:    accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationCreateMachine:              accountPolicy(orgScope(identitystore.OrgActionManage)),
+	operationConnectBYOMachine:          browserSessionPolicy(orgScope(identitystore.OrgActionManage)),
 	operationListMachinePools:           accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationCreateMachinePool:          accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationGetMachinePool:             accountPolicy(orgScope(identitystore.OrgActionManage)),
@@ -273,6 +276,7 @@ var openAPIOperationPolicies = map[operationID]operationPolicy{
 	operationUpdateConfiguredModel:      accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationDeleteConfiguredModel:      accountPolicy(orgScope(identitystore.OrgActionManage)),
 	operationListOrgMembers:             accountPolicy(orgScope(identitystore.OrgActionRead)),
+	operationGetOrgOverview:             accountPolicy(orgScope(identitystore.OrgActionRead)),
 	operationListVisibleProjects:        accountPolicy(orgScope(identitystore.OrgActionRead)),
 	operationListVisibleMachines:        accountPolicy(orgScope(identitystore.OrgActionRead)),
 	operationCreateSecret:               accountPolicy(orgScope(identitystore.OrgActionRead)),
