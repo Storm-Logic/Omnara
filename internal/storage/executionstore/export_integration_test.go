@@ -199,17 +199,18 @@ type IntegrationCreateAgentContentInputTxResult struct {
 }
 
 type IntegrationInsertAgentMachineBindingInput struct {
-	ProjectID             ID
-	AgentID               ID
-	CreateToolCallID      ID
-	ProjectMachineGrantID ID
-	MachineRef            string
-	BindingKind           AgentMachineBindingKind
-	Description           string
-	Cwd                   string
-	EnvOverlay            json.RawMessage
-	SecretEnvOverlay      json.RawMessage
-	Metadata              json.RawMessage
+	ProjectID              ID
+	AgentID                ID
+	CreateToolCallID       ID
+	ProjectMachineGrantID  ID
+	MachineRef             string
+	BindingKind            AgentMachineBindingKind
+	Description            string
+	Cwd                    string
+	EnvOverlay             json.RawMessage
+	SecretEnvOverlay       json.RawMessage
+	DeleteAfterIdleMinutes *int
+	Metadata               json.RawMessage
 }
 
 type IntegrationLaunchMachineSource struct {
@@ -323,21 +324,21 @@ func IntegrationInsertAgentMachineBindingTx(
 	return insertAgentMachineBindingTx(ctx, qtx, insertAgentMachineBindingInput(input))
 }
 
+func IntegrationGetAgentMachineObservationByRef(
+	ctx context.Context,
+	qtx *dbsqlc.Queries,
+	projectID, agentID ID,
+	machineRef string,
+) (AgentMachineObservationRecord, error) {
+	return getAgentMachineObservationByRef(ctx, qtx, projectID, agentID, machineRef)
+}
+
 func IntegrationListPoolMachinesTx(
 	ctx context.Context,
 	qtx *dbsqlc.Queries,
 	projectID, agentID ID,
 ) ([]PoolMachineRecord, error) {
 	return listPoolMachinesTx(ctx, qtx, projectID, agentID)
-}
-
-func IntegrationGetPoolMachineByRef(
-	ctx context.Context,
-	qtx *dbsqlc.Queries,
-	projectID, agentID ID,
-	machineRef string,
-) (PoolMachineRecord, error) {
-	return getPoolMachineByRef(ctx, qtx, projectID, agentID, machineRef)
 }
 
 func IntegrationPoolMachineByRefTx(

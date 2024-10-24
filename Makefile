@@ -9,6 +9,7 @@ GOOSE_TOOL_MOD := tools/goose/go.mod
 GOOSE_OFFLINE_BUILD_TAGS := no_clickhouse,no_libsql,no_mssql,no_mysql,no_postgres,no_sqlite3,no_vertica,no_ydb
 GOOSE ?= GOFLAGS='-tags=$(GOOSE_OFFLINE_BUILD_TAGS)' $(GO) tool -modfile=$(GOOSE_TOOL_MOD) github.com/pressly/goose/v3/cmd/goose
 REPO_ROOT := $(CURDIR)
+REACT_DOCTOR_BASE ?= origin/main
 GOLANGCI_LINT ?= $(REPO_ROOT)/.tools/custom-golangci-lint
 GOVULNCHECK ?= $(CI_TOOL) golang.org/x/vuln/cmd/govulncheck
 OAPI_CODEGEN ?= $(CI_TOOL) github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
@@ -65,8 +66,8 @@ LOAD_DOTENV = set -a; [ ! -f .env ] || . ./.env; set +a
 	sqlc-generate sqlc-check sql-rules sqlc-vet migrate-test-db sqlc-vet-db sqlc-vet-local-db \
 	unit coverage test-database-contracts test-integration test-integration-storage test-integration-httpapi test-integration-runtime clean-integration-dbs db-up db-down stack-up stack-down fmt run-migrate run-api run-worker run-maintenance \
 	test-service-e2e \
-	web-install web-generate web-generate-check build-web build-api build-api-from-dist build-omnarad web-lint web-check web-e2e run-web \
-	test-live-web test-live-openai test-live-openai-chat-completions test-live-openrouter test-live-anthropic \
+	web-install web-generate web-generate-check build-web build-api build-api-from-dist build-omnarad web-lint web-doctor web-check web-check-all web-e2e run-web \
+	test-live-web test-live-openai-responses test-live-openai-chat-completions test-live-openrouter test-live-anthropic \
 	test-live-api-format-switching test-live-sandbox-providers test-live \
 	docs-openapi docs-openapi-check
 
@@ -372,7 +373,10 @@ build-omnarad:
 web-lint:
 	cd frontend && pnpm run lint
 
-web-check:
+web-doctor: ## Run React Doctor against changes from REACT_DOCTOR_BASE
+	cd frontend && pnpm run doctor --base "$(REACT_DOCTOR_BASE)"
+
+web-check: ## Run the frontend test, typecheck, build, lint, and format gate
 	cd frontend && pnpm install --frozen-lockfile && pnpm run generate:api
 	@untracked="$$(git ls-files --others --exclude-standard frontend/packages/sdk/src/generated)"; \
 	if [ -n "$$untracked" ]; then \
@@ -381,6 +385,9 @@ web-check:
 	git diff --exit-code -- frontend/packages/sdk/src/generated
 	cd frontend && pnpm run test && pnpm run typecheck && pnpm run build && pnpm run lint && pnpm run format:check
 	$(GO) test -run '^$$' -tags=requirespa ./cmd/api
+
+web-check-all: web-check ## Run the frontend gate plus React Doctor locally
+	$(MAKE) web-doctor REACT_DOCTOR_BASE="$(REACT_DOCTOR_BASE)"
 
 web-e2e: web-check db-up
 	cd frontend && pnpm --filter @omnara/web exec playwright install $${CI:+--with-deps} --only-shell chromium
@@ -432,35 +439,38 @@ test-live-web:
 	@$(LOAD_DOTENV); \
 	$(GO) test -count=1 -v -tags=live ./internal/webaccess
 
-test-live-openai:
+test-live-openai-responses:
 	@$(LOAD_DOTENV); \
-	: "$${OPENAI_API_KEY:?OPENAI_API_KEY is required for live OpenAI tests}"; \
-	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=20m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenAI(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
-	$(TEST_DB_ENV) $(GO) test -count=1 -v -tags='integration live' ./internal/compaction -run '^TestRunnerLiveOpenAICompactionCreatesCheckpoint$$'
+	: "$${OPENAI_API_KEY:?OPENAI_API_KEY is required for live OpenAI Responses tests}"; \
+	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=25m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenAIResponses(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
+	$(TEST_DB_ENV) $(GO) test -count=1 -v -tags='integration live' ./internal/compaction -run '^TestRunnerLiveOpenAIResponsesCompactionCreatesCheckpoint$$'
 
 test-live-openai-chat-completions:
 	@$(LOAD_DOTENV); \
 	: "$${OPENAI_API_KEY:?OPENAI_API_KEY is required for live OpenAI Chat Completions tests}"; \
 	$(GO) test -count=1 -v -tags=live ./internal/model/openaichatcompletions -run '^TestLiveOpenAIChatCompletionsText$$' && \
-	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenAIChatCompletionsModelTurn$$'
+	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=25m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenAIChatCompletions(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
+	$(TEST_DB_ENV) $(GO) test -count=1 -v -tags='integration live' ./internal/compaction -run '^TestRunnerLiveOpenAIChatCompletionsCompactionCreatesCheckpoint$$'
 
 test-live-openrouter:
 	@$(LOAD_DOTENV); \
 	: "$${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for live OpenRouter tests}"; \
 	$(GO) test -count=1 -v -tags=live ./internal/model/openaichatcompletions -run '^TestLiveOpenRouterChatCompletions' && \
-	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenRouterModelTurn$$'
+	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=25m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveOpenRouter(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
+	$(TEST_DB_ENV) $(GO) test -count=1 -v -tags='integration live' ./internal/compaction -run '^TestRunnerLiveOpenRouterCompactionCreatesCheckpoint$$'
 
 test-live-anthropic:
 	@$(LOAD_DOTENV); \
 	: "$${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required for live Anthropic tests}"; \
-	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=20m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveAnthropic(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
+	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=25m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveAnthropic(ModelTurn|CompactionRecall|DockerDaemonProcessTools)$$' && \
 	$(TEST_DB_ENV) $(GO) test -count=1 -v -tags='integration live' ./internal/compaction -run '^TestRunnerLiveAnthropicCompactionCreatesCheckpoint$$'
 
 test-live-api-format-switching:
 	@$(LOAD_DOTENV); \
 	: "$${OPENAI_API_KEY:?OPENAI_API_KEY is required for live API-format switching tests}"; \
+	: "$${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required for live API-format switching tests}"; \
 	: "$${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required for live API-format switching tests}"; \
-	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveAPIFormatSwitchingPreservesHistory$$'
+	$(SERVICE_E2E_ENV) $(GO) test -count=1 -v -timeout=20m -tags='integration servicee2e live' ./internal/e2e -run '^TestServiceE2ELiveAPIFormatSwitchingPreservesHistory$$'
 
 test-live-sandbox-providers:
 	@$(LOAD_DOTENV); \
@@ -470,7 +480,7 @@ test-live-sandbox-providers:
 		./internal/machinepool/providers/unikraft \
 		-run '^Test(Blaxel|Daytona|Unikraft)ProviderLiveSmoke$$'
 
-test-live: test-live-web test-live-openai test-live-openai-chat-completions test-live-openrouter test-live-anthropic test-live-api-format-switching test-live-sandbox-providers
+test-live: test-live-web test-live-openai-responses test-live-openai-chat-completions test-live-openrouter test-live-anthropic test-live-api-format-switching test-live-sandbox-providers
 
 # Black-box API suite against a deployed control plane.
 # The -timeout must stay comfortably above the suite's worst-case waits (~9m of

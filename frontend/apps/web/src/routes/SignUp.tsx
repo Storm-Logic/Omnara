@@ -1,15 +1,14 @@
 import { requestSignup } from '@omnara/sdk/browser'
 import { Link } from '@tanstack/react-router'
-import { MailCheck } from 'lucide-react'
 import type { SyntheticEvent } from 'react'
 import { useState } from 'react'
 
 import { AuthHeading, AuthLayout } from '@/components/auth/AuthLayout'
 import { SocialButtons } from '@/components/auth/SocialButtons'
+import { MailCheck } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Spinner } from '@/components/ui/spinner'
 import type { SubmitStatus } from '@/lib/submit-status'
 import { idle, statusError, submitError, submitting, success } from '@/lib/submit-status'
 
@@ -30,9 +29,10 @@ export function SignUp() {
       await requestSignup(state.email)
       setState((prev) => ({ ...prev, status: success }))
     } catch (err) {
+      const status = submitError(err, 'Signup request failed')
       setState((prev) => ({
         ...prev,
-        status: submitError(err, 'Signup request failed'),
+        status,
       }))
     }
   }
@@ -85,8 +85,7 @@ export function SignUp() {
               />
             </Field>
             {errorMessage && <FieldError>{errorMessage}</FieldError>}
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting && <Spinner />}
+            <Button type="submit" className="w-full" disabled={isSubmitting} loading={isSubmitting}>
               Send verification link
             </Button>
           </FieldGroup>

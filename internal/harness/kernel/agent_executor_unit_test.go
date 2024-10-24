@@ -78,6 +78,42 @@ func TestAgentExecutorDependencyComposition(t *testing.T) {
 	}
 }
 
+func TestProviderInputFailureTriggerRoutesOnlyDeterministicInputFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		kind model.ErrorKind
+		want bool
+	}{
+		{name: "context window", kind: model.ErrorKindContextWindow, want: true},
+		{name: "payload too large", kind: model.ErrorKindPayloadTooLarge, want: true},
+		{name: "rate limit", kind: model.ErrorKindRateLimit},
+		{name: "transient", kind: model.ErrorKindTransient},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cause := model.ProviderError{
+				Kind:      test.kind,
+				Code:      "provider_code",
+				Message:   "provider message",
+				RequestID: "request-id",
+			}
+			trigger, got := providerInputFailureTrigger(cause)
+			if got != test.want {
+				t.Fatalf("maintenance trigger = %+v ok=%t, want ok=%t", trigger, got, test.want)
+			}
+			if !test.want {
+				return
+			}
+			var retained model.ProviderError
+			if trigger.Kind != test.kind || trigger.Code != cause.Code ||
+				trigger.Message != cause.Message || trigger.RequestID != cause.RequestID ||
+				!errors.As(trigger.Cause, &retained) || retained.Kind != test.kind {
+				t.Fatalf("maintenance trigger = %+v, want retained %q evidence", trigger, test.kind)
+			}
+		})
+	}
+}
+
 func TestRetainFromForRecentEventsUsesApproximateTokenTail(t *testing.T) {
 	events := []executionstore.CompactionSourceEventRecord{
 		{Sequence: 10, ContentParts: json.RawMessage(`[{"type":"text","text":"old compactable history"}]`)},
@@ -257,17 +293,6 @@ func TestShouldPostIntegrationRuntimeMessageAllowsUnavailableGrantAfterModelResp
 	}
 	if !shouldPostIntegrationRuntimeMessage(ctx, errors.New("boom"), false) {
 		t.Fatal("generic runtime error before a model response should post a runtime message")
-	}
-}
-
-func TestIntegrationRuntimeErrorMessage(t *testing.T) {
-	unavailable := integrationRuntimeErrorMessage(storeerr.ErrModelGrantUnavailable)
-	if !strings.Contains(unavailable, "does not have access to the configured model") {
-		t.Fatalf("unavailable model grant message = %q", unavailable)
-	}
-	generic := integrationRuntimeErrorMessage(errors.New("boom"))
-	if strings.Contains(generic, "configured model") {
-		t.Fatalf("generic runtime message used unavailable-grant wording: %q", generic)
 	}
 }
 

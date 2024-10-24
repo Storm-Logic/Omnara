@@ -25,6 +25,17 @@ export type Error = {
     code: 'invalid_request' | 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'gone' | 'request_too_large' | 'unsupported_media_type' | 'unprocessable' | 'rate_limited' | 'internal_error' | 'upstream_error' | 'service_unavailable' | 'idempotency_key_conflict' | 'state_transition_conflict' | 'managed_work_admission_denied' | 'pending_work' | 'not_wake_capable' | 'daemon_runtime_unregistered' | 'validation_failed' | 'csrf_check_failed' | 'authentication_unavailable';
 };
 
+export type Warning = {
+    /**
+     * Human-readable warning message. Do not match on it programmatically.
+     */
+    message: string;
+    /**
+     * Stable warning code for programmatic handling.
+     */
+    code: 'missing_recommended_machine_tools';
+};
+
 /**
  * Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
  */
@@ -36,7 +47,7 @@ export type ClientErrorCode = 'invalid_request' | 'validation_failed' | 'unautho
 export type ServerErrorCode = 'internal_error' | 'upstream_error' | 'service_unavailable' | 'authentication_unavailable';
 
 /**
- * Lifecycle owner. Tenant-managed resources can be changed through tenant APIs; cluster-managed resources are installed by the control plane and are read-only through tenant lifecycle APIs.
+ * Lifecycle owner. Tenant-managed resources can be changed through tenant APIs. Cluster-managed resources are installed and lifecycle-managed by the control plane; individual APIs may explicitly expose tenant-editable settings.
  */
 export type ManagementKind = 'tenant' | 'cluster';
 
@@ -50,6 +61,10 @@ export type OrgApiKeyId = string;
 
 export type ProjectId = string;
 
+export type McpoAuthFlowId = string;
+
+export type IntegrationOAuthFlowId = string;
+
 export type ActorId = string;
 
 export type AgentId = string;
@@ -57,6 +72,8 @@ export type AgentId = string;
 export type AgentConfigId = string;
 
 export type AgentProfileId = string;
+
+export type CronTriggerId = string;
 
 export type IntegrationInstallId = string;
 
@@ -95,7 +112,7 @@ export type ModelProviderApiVariant = 'default' | 'openrouter' | 'bedrock';
 export type ModelProviderApiVariantResponse = string;
 
 /**
- * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, and selected reasoning policy. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
+ * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, output-token limit, and selected reasoning policy. Provider passthrough values for those fields are ignored. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
  */
 export type ModelApiVariantOptions = {
     [key: string]: unknown;
@@ -333,6 +350,7 @@ export type ConfiguredModel = {
     id: ConfiguredModelId;
     org_id: OrganizationId;
     model_provider_config_id: ModelProviderConfigId;
+    management_kind: ManagementKind;
     /**
      * Admin-facing configured model name used by agent YAML as model.name.
      */
@@ -721,6 +739,7 @@ export type McpoAuthStartMetadata = {
 };
 
 export type McpoAuthStartResponse = {
+    flow_id: McpoAuthFlowId;
     authorization_url: string;
     expires_at: Timestamp;
 };
@@ -763,6 +782,7 @@ export type ListIntegrationInstallsResponse = {
 
 export type IntegrationOAuthSetup = {
     provider: string;
+    flow_id: IntegrationOAuthFlowId;
     oauth_url: string;
     redirect_uri: string;
     events_url: string;
@@ -784,6 +804,7 @@ export type SlackSetupIcon = {
 
 export type SlackSetup = {
     provider: string;
+    flow_id: IntegrationOAuthFlowId;
     slack_app_id: string;
     oauth_url: string;
     redirect_uri: string;
@@ -795,6 +816,15 @@ export type SlackSetup = {
 export type CreateAgentConfigRequest = {
     source: string;
     source_format: 'yaml' | 'json';
+};
+
+/**
+ * Replaces a live agent's config. expected_current_config_id makes the change conditional on the agent still running that config, so concurrent editors get a conflict instead of silently overwriting each other.
+ */
+export type UpdateAgentConfigRequest = {
+    source: string;
+    source_format: 'yaml' | 'json';
+    expected_current_config_id?: AgentConfigId;
 };
 
 export type ToolPermissionSelection = {
@@ -876,6 +906,10 @@ export type AgentConfig = {
     effective_definition_hash: string;
     model: AgentConfigModel;
     instruction_hash?: string;
+    /**
+     * Non-blocking diagnostics about the agent config.
+     */
+    warnings?: Array<Warning>;
     created_at: Timestamp;
 };
 
@@ -887,6 +921,10 @@ export type CreateAgentProfileRequest = {
 export type UpdateAgentProfileRequest = {
     config: AgentConfigId;
     expected_current_config_id: AgentConfigId;
+};
+
+export type RenameAgentProfileRequest = {
+    name: string;
 };
 
 export type AgentProfile = {
@@ -903,6 +941,100 @@ export type AgentProfile = {
 
 export type ListAgentProfilesResponse = {
     data: Array<AgentProfile>;
+    /**
+     * Opaque cursor for the next page, or null when this is the last page.
+     */
+    next_cursor: string | null;
+};
+
+export type AgentCronTriggerTarget = {
+    type: 'agent';
+    agent_id: AgentId;
+};
+
+export type AgentProfileCronTriggerTarget = {
+    type: 'profile';
+    agent_profile_id: AgentProfileId;
+};
+
+export type CronTriggerTarget = ({
+    type: 'agent';
+} & AgentCronTriggerTarget) | ({
+    type: 'profile';
+} & AgentProfileCronTriggerTarget);
+
+/**
+ * Standard five-field cron expression (minute, hour, day of month, month, day of week). `TZ=`/`CRON_TZ=` prefixes are rejected; set the `timezone` field instead.
+ */
+export type CronExpression = string;
+
+/**
+ * IANA time zone the schedule is evaluated in.
+ */
+export type CronTimezone = string;
+
+/**
+ * Go text/template rendered on each firing to produce the message sent to the target. The template receives a `trigger` value with `name`, `fired_at`, and `last_fired_at` fields. Rendering is capped at 64 KiB of output and one second of wall-clock time, and `printf` width and precision specifiers are capped at 1024; a firing whose template fails to render is recorded in `failure_report` without sending a message.
+ */
+export type CronMessageTemplate = string;
+
+export type CronTriggerFailureReport = {
+    /**
+     * Why the most recent failed firing did not deliver a message.
+     */
+    message: string;
+    /**
+     * Whether the firing will be retried after the claim lease expires.
+     */
+    will_retry: boolean;
+    failed_at: Timestamp;
+};
+
+export type CreateCronTriggerRequest = {
+    name: string;
+    target: CronTriggerTarget;
+    cron: CronExpression;
+    timezone?: CronTimezone;
+    message_template: CronMessageTemplate;
+    enabled?: boolean;
+};
+
+export type UpdateCronTriggerRequest = {
+    name?: string;
+    cron?: CronExpression;
+    timezone?: CronTimezone;
+    message_template?: CronMessageTemplate;
+    enabled?: boolean;
+};
+
+export type CronTrigger = {
+    id: CronTriggerId;
+    org_id: OrganizationId;
+    project_id: ProjectId;
+    name: string;
+    target: CronTriggerTarget;
+    cron: CronExpression;
+    timezone: CronTimezone;
+    message_template: CronMessageTemplate;
+    enabled: boolean;
+    /**
+     * When the trigger last fired, or null if it has never fired.
+     */
+    last_fired_at: Timestamp | null;
+    /**
+     * Next scheduled firing, or null while the trigger is disabled.
+     */
+    next_fire_at: Timestamp | null;
+    /**
+     * Most recent failed firing, or null if no firing has failed since the last successful firing.
+     */
+    failure_report: CronTriggerFailureReport | null;
+    created_at: Timestamp;
+    updated_at: Timestamp;
+};
+
+export type ListCronTriggersResponse = {
+    data: Array<CronTrigger>;
     /**
      * Opaque cursor for the next page, or null when this is the last page.
      */
@@ -947,8 +1079,30 @@ export type IntegrationTarget = {
     provider_uri?: string;
 };
 
+export type AgentMcpConnection = {
+    server_key: string;
+    endpoint_url: string;
+    state: 'initializing' | 'ready' | 'failed' | 'expired';
+    protocol_version?: string;
+    initialize_error: string;
+    created_at: Timestamp;
+    updated_at: Timestamp;
+};
+
+export type CurrentAgentResponse = {
+    agent: Agent;
+};
+
 export type GetAgentResponse = {
     agent: Agent;
+    /**
+     * Machines currently attached to the agent, in binding creation order.
+     */
+    machine_ids: Array<MachineId>;
+    /**
+     * The agent's MCP server connections, ordered by server key.
+     */
+    mcp_connections: Array<AgentMcpConnection>;
 };
 
 export type ListAgentsResponse = {
@@ -1126,6 +1280,19 @@ export type AgentMachineBinding = {
     };
     created_at: Timestamp;
     updated_at: Timestamp;
+};
+
+/**
+ * The machine's most recent daemon-reported failure. A single slot, overwritten by newer reports and cleared when the daemon recovers.
+ */
+export type MachineFailureReport = {
+    stage: 'startup_script' | 'daemon_install' | 'daemon_update' | 'daemon_uninstall' | 'daemon_uninstalled';
+    exit_status?: number;
+    output_tail: string;
+    output_truncated: boolean;
+    daemon_version?: string;
+    target_version?: string;
+    reported_at: Timestamp;
 };
 
 export type LaunchAgentResponse = {
@@ -1872,6 +2039,7 @@ export type OrganizationMembership = {
 export type OrgInvitation = {
     id: OrgInvitationId;
     org_id: OrganizationId;
+    org_name: string;
     email: string;
     org_role: string;
     created_at: Timestamp;
@@ -2035,6 +2203,10 @@ export type CreateMachinePoolRequestBase = {
     min_machine_memory_mb?: number;
     max_machine_cpu?: number;
     max_machine_memory_mb?: number;
+    /**
+     * Idle minutes before deleting a machine from this pool. Omit to leave the pool default unset; a grant or agent source may still override it.
+     */
+    delete_after_idle_minutes?: number;
     metadata?: MachineMetadata;
 };
 
@@ -2074,6 +2246,10 @@ export type UpdateMachinePoolRequest = {
     min_machine_memory_mb?: number | null;
     max_machine_cpu?: number | null;
     max_machine_memory_mb?: number | null;
+    /**
+     * Idle minutes before deleting a machine from this pool. Null clears the pool default; omitted leaves it unchanged.
+     */
+    delete_after_idle_minutes?: number | null;
     metadata?: MachineMetadata;
 };
 
@@ -2117,9 +2293,23 @@ export type MachinePool = {
     min_machine_memory_mb: number | null;
     max_machine_cpu: number | null;
     max_machine_memory_mb: number | null;
+    /**
+     * Idle minutes before deleting a machine from this pool, or null when the pool default is unset.
+     */
+    delete_after_idle_minutes: number | null;
     metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
+    /**
+     * Current quota-consuming usage. Populated when the machine pool is returned by the list endpoint.
+     */
+    usage?: MachinePoolUsage;
+};
+
+export type MachinePoolUsage = {
+    machines: number;
+    cpu: number;
+    memory_mb: number;
 };
 
 export type ListMachinePoolsResponse = {
@@ -2158,6 +2348,7 @@ export type Machine = {
     };
     lifecycle_reason_code: string;
     lifecycle_reason_message: string;
+    failure_report?: MachineFailureReport;
     next_reconcile_after: Timestamp | null;
     provision_attempts: number;
     delete_attempts: number;
@@ -2311,6 +2502,10 @@ export type ProjectMachinePoolGrant = {
     min_machine_memory_mb: number | null;
     max_machine_cpu: number | null;
     max_machine_memory_mb: number | null;
+    /**
+     * Idle minutes before deleting a machine created through this grant. Zero disables deletion for this grant; null inherits the pool default.
+     */
+    delete_after_idle_minutes: 0 | number | null;
     metadata: Metadata;
     created_at: Timestamp;
     updated_at: Timestamp;
@@ -2344,6 +2539,10 @@ export type CreateProjectMachinePoolGrantRequest = {
     min_machine_memory_mb?: number;
     max_machine_cpu?: number;
     max_machine_memory_mb?: number;
+    /**
+     * Idle minutes before deleting a machine created through this grant. Use 0 to disable for this grant; omit to inherit the pool default. Values from 1 through 4 are invalid.
+     */
+    delete_after_idle_minutes?: 0 | number;
     metadata?: Metadata;
 };
 
@@ -2371,6 +2570,10 @@ export type UpdateProjectMachinePoolGrantRequest = {
     min_machine_memory_mb?: number | null;
     max_machine_cpu?: number | null;
     max_machine_memory_mb?: number | null;
+    /**
+     * Idle minutes before deleting a machine created through this grant. Use 0 to disable for this grant; null restores inheritance from the pool; omitted leaves it unchanged. Values from 1 through 4 are invalid.
+     */
+    delete_after_idle_minutes?: 0 | number | null;
     metadata?: Metadata;
 };
 
@@ -2704,9 +2907,19 @@ export type SecretOwnerKindFilter = 'org' | 'project' | 'user';
 export type SecretOwnerProjectIdFilter = ProjectId;
 
 /**
+ * Filter to secrets that have a version created by this MCP OAuth flow.
+ */
+export type SecretMcpoAuthFlowIdFilter = McpoAuthFlowId;
+
+/**
  * Only return integration installs bound to this agent profile.
  */
 export type IntegrationInstallAgentProfileFilter = AgentProfileId;
+
+/**
+ * Only return the integration install completed by this OAuth setup flow.
+ */
+export type IntegrationInstallOAuthFlowIdFilter = IntegrationOAuthFlowId;
 
 /**
  * Filter a project inventory by how the secret became available.
@@ -5578,6 +5791,10 @@ export type ListSecretsData = {
          */
         owner_project_id?: ProjectId;
         /**
+         * Filter to secrets that have a version created by this MCP OAuth flow.
+         */
+        mcp_oauth_flow_id?: McpoAuthFlowId;
+        /**
          * Metadata key/value filters, encoded as metadata[key]=value.
          */
         metadata?: {
@@ -6326,6 +6543,10 @@ export type ListIntegrationInstallsData = {
          * Only return integration installs bound to this agent profile.
          */
         agent_profile_id?: AgentProfileId;
+        /**
+         * Only return the integration install completed by this OAuth setup flow.
+         */
+        oauth_flow_id?: IntegrationOAuthFlowId;
         sort?: ResourceListSort;
         /**
          * Maximum number of items to return in one page.
@@ -6946,6 +7167,75 @@ export type GetAgentProfileResponses = {
 
 export type GetAgentProfileResponse = GetAgentProfileResponses[keyof GetAgentProfileResponses];
 
+export type RenameAgentProfileData = {
+    body: RenameAgentProfileRequest;
+    path: {
+        orgID: string;
+        projectID: string;
+        agentProfileID: string;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/agent-profiles/{agentProfileID}';
+};
+
+export type RenameAgentProfileErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current resource state or idempotency history.
+     */
+    409: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type RenameAgentProfileError = RenameAgentProfileErrors[keyof RenameAgentProfileErrors];
+
+export type RenameAgentProfileResponses = {
+    /**
+     * Agent profile renamed.
+     */
+    200: AgentProfile;
+};
+
+export type RenameAgentProfileResponse = RenameAgentProfileResponses[keyof RenameAgentProfileResponses];
+
 export type UpdateAgentProfileData = {
     body: UpdateAgentProfileRequest;
     headers?: {
@@ -7159,6 +7449,369 @@ export type CreateSlackSetupResponses = {
 
 export type CreateSlackSetupResponse = CreateSlackSetupResponses[keyof CreateSlackSetupResponses];
 
+export type ListCronTriggersData = {
+    body?: never;
+    path: {
+        orgID: string;
+        projectID: string;
+    };
+    query?: {
+        /**
+         * Case-insensitive glob over the list's logical name. `*` matches zero or more characters, `?` matches one character, and `\` escapes a wildcard.
+         */
+        name?: string;
+        /**
+         * Only return triggers targeting this agent.
+         */
+        agent_id?: AgentId;
+        /**
+         * Only return triggers targeting this agent profile.
+         */
+        agent_profile_id?: AgentProfileId;
+        sort?: ResourceListSort;
+        /**
+         * Maximum number of items to return in one page.
+         */
+        limit?: number;
+        /**
+         * Opaque pagination cursor from a previous response's next_cursor. Omit for the first page.
+         */
+        cursor?: string;
+    };
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers';
+};
+
+export type ListCronTriggersErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type ListCronTriggersError = ListCronTriggersErrors[keyof ListCronTriggersErrors];
+
+export type ListCronTriggersResponses = {
+    /**
+     * Cron triggers in the project, newest first.
+     */
+    200: ListCronTriggersResponse;
+};
+
+export type ListCronTriggersResponse2 = ListCronTriggersResponses[keyof ListCronTriggersResponses];
+
+export type CreateCronTriggerData = {
+    body: CreateCronTriggerRequest;
+    headers?: {
+        /**
+         * Idempotency key for replay-safe mutating requests.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        orgID: string;
+        projectID: string;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers';
+};
+
+export type CreateCronTriggerErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current resource state or idempotency history.
+     */
+    409: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type CreateCronTriggerError = CreateCronTriggerErrors[keyof CreateCronTriggerErrors];
+
+export type CreateCronTriggerResponses = {
+    /**
+     * Existing cron trigger returned.
+     */
+    200: CronTrigger;
+    /**
+     * Cron trigger created.
+     */
+    201: CronTrigger;
+};
+
+export type CreateCronTriggerResponse = CreateCronTriggerResponses[keyof CreateCronTriggerResponses];
+
+export type DeleteCronTriggerData = {
+    body?: never;
+    path: {
+        orgID: string;
+        projectID: string;
+        cronTriggerID: CronTriggerId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers/{cronTriggerID}';
+};
+
+export type DeleteCronTriggerErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type DeleteCronTriggerError = DeleteCronTriggerErrors[keyof DeleteCronTriggerErrors];
+
+export type DeleteCronTriggerResponses = {
+    /**
+     * Resource deleted.
+     */
+    204: void;
+};
+
+export type DeleteCronTriggerResponse = DeleteCronTriggerResponses[keyof DeleteCronTriggerResponses];
+
+export type GetCronTriggerData = {
+    body?: never;
+    path: {
+        orgID: string;
+        projectID: string;
+        cronTriggerID: CronTriggerId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers/{cronTriggerID}';
+};
+
+export type GetCronTriggerErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type GetCronTriggerError = GetCronTriggerErrors[keyof GetCronTriggerErrors];
+
+export type GetCronTriggerResponses = {
+    /**
+     * Cron trigger.
+     */
+    200: CronTrigger;
+};
+
+export type GetCronTriggerResponse = GetCronTriggerResponses[keyof GetCronTriggerResponses];
+
+export type UpdateCronTriggerData = {
+    body: UpdateCronTriggerRequest;
+    path: {
+        orgID: string;
+        projectID: string;
+        cronTriggerID: CronTriggerId;
+    };
+    query?: never;
+    url: '/api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers/{cronTriggerID}';
+};
+
+export type UpdateCronTriggerErrors = {
+    /**
+     * The request was invalid.
+     */
+    400: Error;
+    /**
+     * Authentication is required or invalid.
+     */
+    401: Error;
+    /**
+     * The authenticated principal is not authorized.
+     */
+    403: Error;
+    /**
+     * The requested resource was not found or is not visible.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current resource state or idempotency history.
+     */
+    409: Error;
+    /**
+     * The service dependency required to satisfy the request is unavailable.
+     */
+    503: Error;
+    /**
+     * Any other client error. The body carries the shared Error envelope restricted to client error codes; statuses with a dedicated response above are documented precisely.
+     */
+    '4XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ClientErrorCode;
+    };
+    /**
+     * Any other server error. The body carries the shared Error envelope restricted to server error codes.
+     */
+    '5XX': {
+        /**
+         * Human-readable error message. Do not match on it programmatically.
+         */
+        error: string;
+        code: ServerErrorCode;
+    };
+};
+
+export type UpdateCronTriggerError = UpdateCronTriggerErrors[keyof UpdateCronTriggerErrors];
+
+export type UpdateCronTriggerResponses = {
+    /**
+     * Cron trigger updated.
+     */
+    200: CronTrigger;
+};
+
+export type UpdateCronTriggerResponse = UpdateCronTriggerResponses[keyof UpdateCronTriggerResponses];
+
 export type ListAgentsData = {
     body?: never;
     path: {
@@ -7310,7 +7963,7 @@ export type CreateAgentResponses = {
     /**
      * Current state of the previously created agent.
      */
-    200: GetAgentResponse;
+    200: CurrentAgentResponse;
     /**
      * Agent launched.
      */
@@ -7448,13 +8101,13 @@ export type ArchiveAgentResponses = {
     /**
      * The archived agent.
      */
-    200: GetAgentResponse;
+    200: CurrentAgentResponse;
 };
 
 export type ArchiveAgentResponse = ArchiveAgentResponses[keyof ArchiveAgentResponses];
 
 export type UpdateAgentConfigData = {
-    body: CreateAgentConfigRequest;
+    body: UpdateAgentConfigRequest;
     headers?: {
         /**
          * Idempotency key for replay-safe mutating requests.

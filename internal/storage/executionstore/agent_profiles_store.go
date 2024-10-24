@@ -57,6 +57,9 @@ func (s *Store) CreateAgentProfile(
 		}
 		return record, nil
 	}
+	if err := lockAgentConfigModelForUseTx(ctx, qtx, config); err != nil {
+		return AgentProfileRecord{}, err
+	}
 	if err := lockResourceCreation(ctx, qtx, resourceAgentProfiles, input.ProjectID.String()); err != nil {
 		return AgentProfileRecord{}, err
 	}
@@ -176,6 +179,9 @@ func (s *Store) RetargetAgentProfile(
 		}
 		return profile, nil
 	}
+	if err := lockAgentConfigModelForUseTx(ctx, qtx, config); err != nil {
+		return AgentProfileRecord{}, err
+	}
 	row, err := qtx.RetargetAgentProfile(
 		ctx,
 		dbsqlc.RetargetAgentProfileParams{
@@ -200,6 +206,67 @@ func (s *Store) RetargetAgentProfile(
 	record.CurrentConfig = config
 	if err := tx.Commit(ctx); err != nil {
 		return AgentProfileRecord{}, fmt.Errorf("commit retarget agent profile: %w", err)
+	}
+	return record, nil
+}
+
+type RenameAgentProfileInput struct {
+	ProjectID ID
+	ProfileID ID
+	Name      string
+}
+
+func (s *Store) RenameAgentProfile(
+	ctx context.Context,
+	input RenameAgentProfileInput,
+) (AgentProfileRecord, error) {
+	if isNilID(input.ProjectID) || isNilID(input.ProfileID) {
+		return AgentProfileRecord{}, errors.New("project and profile are required")
+	}
+	if input.Name == "" {
+		return AgentProfileRecord{}, errors.New("name is required")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return AgentProfileRecord{}, fmt.Errorf("begin rename agent profile: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	qtx := s.q.WithTx(tx)
+	rows, err := qtx.RenameAgentProfile(
+		ctx,
+		dbsqlc.RenameAgentProfileParams{
+			ProjectID: input.ProjectID,
+			ProfileID: input.ProfileID,
+			Name:      input.Name,
+		},
+	)
+	if err != nil {
+		if isUniqueViolationOnConstraint(err, "agent_profiles_active_name_idx") {
+			return AgentProfileRecord{}, fmt.Errorf(
+				"agent profile name already exists: %w",
+				storeerr.ErrConflict,
+			)
+		}
+		return AgentProfileRecord{}, fmt.Errorf("rename agent profile: %w", err)
+	}
+	if rows == 0 {
+		return AgentProfileRecord{}, fmt.Errorf(
+			"agent profile not found: %w",
+			storeerr.ErrNotFound,
+		)
+	}
+	record, err := loadAgentProfileTx(ctx, qtx, input.ProjectID, input.ProfileID)
+	if err != nil {
+		return AgentProfileRecord{}, err
+	}
+	config, err := loadAgentConfigTx(ctx, qtx, input.ProjectID, record.CurrentConfigID)
+	if err != nil {
+		return AgentProfileRecord{}, err
+	}
+	record.CurrentConfig = config
+	if err := tx.Commit(ctx); err != nil {
+		return AgentProfileRecord{}, fmt.Errorf("commit rename agent profile: %w", err)
 	}
 	return record, nil
 }
@@ -365,6 +432,11 @@ func (s *Store) DeleteAgentProfile(ctx context.Context, projectID, id ID) error 
 		ProjectID: projectID, ProfileID: id,
 	}); err != nil {
 		return fmt.Errorf("delete agent profile versions: %w", err)
+	}
+	if _, err := qtx.DeleteCronTriggersForAgentProfile(ctx, dbsqlc.DeleteCronTriggersForAgentProfileParams{
+		ProjectID: projectID, AgentProfileID: &id,
+	}); err != nil {
+		return fmt.Errorf("delete agent profile cron triggers: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit delete agent profile: %w", err)

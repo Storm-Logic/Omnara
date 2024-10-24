@@ -4,22 +4,31 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/harness/tools"
+	"github.com/omnara-ai/omnara/internal/integration/slack"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/modelprovider"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
+	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
 	"github.com/omnara-ai/omnara/internal/storage/modelstore"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
+	"github.com/omnara-ai/omnara/internal/testutil/storagetest"
+	"github.com/omnara-ai/omnara/internal/toolcatalog"
+	"github.com/omnara-ai/omnara/internal/toolpermission"
 )
 
-func TestAgentExecutorReloadsAgentModelOptionsFromModelContext(t *testing.T) {
+func TestAgentExecutorReloadsCompiledModelOverridesFromModelContext(t *testing.T) {
 	ctx := context.Background()
 	fixture := newKernelFixture(t, ctx)
 	now := fixture.Now
@@ -85,10 +94,7 @@ model:
 	if err != nil {
 		t.Fatalf("load model contract for context: %v", err)
 	}
-	selection, err := modelSelectionForContext(modelClaim.Context, contract.Model)
-	if err != nil {
-		t.Fatalf("build model selection for context: %v", err)
-	}
+	selection := modelSelectionForContext(modelClaim.Context, contract.Model)
 	if _, err := resolver.Resolve(ctx, selection); err != nil {
 		t.Fatalf("resolve model client for context: %v", err)
 	}
@@ -96,10 +102,109 @@ model:
 		t.Fatalf("resolver selections = %d, want 1", len(resolver.selections))
 	}
 	resolvedSelection := resolver.selections[0]
-	if resolvedSelection.Options.DefaultMaxOutputTokens == nil ||
-		*resolvedSelection.Options.DefaultMaxOutputTokens != 2345 ||
-		resolvedSelection.Options.CacheRetention != model.CacheRetentionLong {
-		t.Fatalf("selection options from context = %+v", resolvedSelection.Options)
+	if resolvedSelection.Overrides.DefaultMaxOutputTokens == nil ||
+		*resolvedSelection.Overrides.DefaultMaxOutputTokens != 2345 ||
+		resolvedSelection.Overrides.CacheRetention != string(model.CacheRetentionLong) {
+		t.Fatalf("selection overrides from context = %+v", resolvedSelection.Overrides)
+	}
+}
+
+func TestAgentExecutorReloadsImplicitIntegrationToolFromModelContext(t *testing.T) {
+	ctx := context.Background()
+	fixture := newKernelFixture(t, ctx)
+	now := fixture.Now
+	sourceYAML := `
+instruction: Send messages through the connected integration.
+model:
+  provider_config: openai-prod
+  name: implicit-integration-tool-model
+`
+	profile := fixture.createConfigAndProfileBookmark(
+		t,
+		ctx,
+		"Kernel Implicit Integration Tool",
+		"kernel-implicit-integration-tool-agent",
+		sourceYAML,
+		now,
+	)
+	launch, err := fixture.Store.Execution().LaunchAgent(
+		ctx,
+		executionstore.LaunchAgentInput{
+			ProjectID:      kernelTestProjectID,
+			ProfileID:      profile.ID,
+			AgentConfigID:  profile.CurrentConfigID,
+			LaunchedBy:     kernelTestUserPrincipal(kernelTestUserID),
+			IdempotencyKey: "kernel-implicit-integration-tool-agent",
+		},
+	)
+	if err != nil {
+		t.Fatalf("launch agent: %v", err)
+	}
+	secret, _, err := fixture.Store.Secrets().CreateSecret(
+		ctx,
+		secretstore.CreateSecretInput{
+			OrgID:          kernelTestOrgID,
+			OwnerKind:      secretstore.SecretOwnerProject,
+			OwnerProjectID: kernelTestProjectID,
+			Name:           "kernel-implicit-integration-tool-credentials",
+			Material: secrets.SlackAppCredentialsMaterial{
+				AccessToken:   "xoxb-test",
+				ClientID:      "client-id",
+				ClientSecret:  "client-secret",
+				SigningSecret: "signing-secret",
+			},
+			Actor: kernelTestUserPrincipal(kernelTestUserID),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create integration credential secret: %v", err)
+	}
+	install, err := fixture.Store.Integrations().UpsertIntegrationInstall(
+		ctx,
+		integrationstore.UpsertIntegrationInstallInput{
+			OrgID:              kernelTestOrgID,
+			ProjectID:          kernelTestProjectID,
+			AgentProfileID:     profile.ID,
+			InstalledByUserID:  kernelTestUserID,
+			Provider:           integrationstore.IntegrationProviderSlack,
+			IntegrationKind:    slack.IntegrationKindAgentProfile,
+			ConnectionMode:     slack.ConnectionModeWebhook,
+			State:              integrationstore.IntegrationInstallStateActive,
+			ProviderTenantID:   "T_IMPLICIT_TOOL",
+			ProviderAccountRef: "A_IMPLICIT_TOOL",
+			CredentialSecretID: secret.ID,
+			ProviderIdentity:   json.RawMessage(`{"bot_user_id":"B_IMPLICIT_TOOL"}`),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create integration install: %v", err)
+	}
+	if _, err := fixture.Store.Integrations().CreateIntegrationTarget(
+		ctx,
+		integrationstore.CreateIntegrationTargetInput{
+			ProjectID:            kernelTestProjectID,
+			AgentID:              launch.Agent.ID,
+			IntegrationInstallID: install.ID,
+			ProviderRef:          "C_IMPLICIT_TOOL:1.0",
+			ProviderRefKind:      "thread",
+		},
+	); err != nil {
+		t.Fatalf("create integration target: %v", err)
+	}
+	specs, err := (AgentExecutor{Store: fixture.Store}).modelContextToolRuntime(
+		ctx,
+		kernelTestProjectID,
+		launch.Agent.ID,
+		executionstore.ModelCallContextRecord{AgentConfigID: profile.CurrentConfigID},
+		now,
+	)
+	if err != nil {
+		t.Fatalf("reload model context tool runtime: %v", err)
+	}
+	if len(specs) != 1 ||
+		specs[0].Name != toolcatalog.ToolNameSendIntegrationMessage ||
+		specs[0].Permission.Mode != toolpermission.ModeAlwaysAllow {
+		t.Fatalf("reloaded tool specs = %+v, want implicit send_integration_message", specs)
 	}
 }
 
@@ -134,6 +239,15 @@ model:
 	if err != nil {
 		t.Fatalf("launch agent: %v", err)
 	}
+	botToken := attachKernelSlackTarget(
+		t,
+		ctx,
+		fixture,
+		launch.Agent.ID,
+		profile.ID,
+		"unavailable-grant",
+		"C_UNAVAILABLE_GRANT:1.0",
+	)
 	config, found, err := fixture.Store.Execution().GetAgentConfig(ctx, kernelTestProjectID, profile.CurrentConfigID)
 	if err != nil {
 		t.Fatalf("load agent config: %v", err)
@@ -166,11 +280,39 @@ model:
 			{ID: "resp_unreachable", Content: []model.ResponsePart{{Type: "text", Text: "should not respond"}}, StopReason: model.StopReasonEndTurn},
 		},
 	}
+	var postedMessage struct {
+		Channel  string `json:"channel"`
+		Text     string `json:"text"`
+		ThreadTS string `json:"thread_ts"`
+	}
+	postCount := 0
+	postedPath := ""
+	postedAuthorization := ""
+	var postedDecodeErr error
+	integrationHTTPClient := &http.Client{Transport: kernelSlackRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			postCount++
+			postedPath = req.URL.Path
+			postedAuthorization = req.Header.Get("Authorization")
+			postedDecodeErr = json.NewDecoder(req.Body).Decode(&postedMessage)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"ok":true,"channel":"C_UNAVAILABLE_GRANT","ts":"2.0"}`,
+				)),
+				Request: req,
+			}, nil
+		},
+	)}
 	executor := AgentExecutor{
 		Store:         fixture.Store,
 		ModelResolver: liveTestModelResolver(fixture.Store, modelClient),
-		ToolExecutor:  tools.Executor{Store: fixture.Store},
-		Now:           func() time.Time { return now.Add(4 * time.Millisecond) },
+		ToolExecutor: tools.Executor{
+			Store:                 fixture.Store,
+			IntegrationHTTPClient: integrationHTTPClient,
+		},
+		Now: func() time.Time { return now.Add(4 * time.Millisecond) },
 	}
 	err = executor.ExecuteModelWork(ctx, turn)
 	if err != nil {
@@ -178,6 +320,23 @@ model:
 	}
 	if len(modelClient.responses) != 1 {
 		t.Fatalf("model responded after unavailable grant; remaining responses=%d", len(modelClient.responses))
+	}
+	if postedDecodeErr != nil {
+		t.Fatalf("decode Slack runtime message: %v", postedDecodeErr)
+	}
+	if postCount != 1 {
+		t.Fatalf("Slack runtime message post count = %d, want 1", postCount)
+	}
+	if postedPath != "/api/chat.postMessage" {
+		t.Fatalf("Slack runtime message path = %q", postedPath)
+	}
+	if postedAuthorization != "Bearer "+botToken {
+		t.Fatalf("Slack runtime message authorization = %q", postedAuthorization)
+	}
+	if postedMessage.Channel != "C_UNAVAILABLE_GRANT" ||
+		postedMessage.ThreadTS != "1.0" ||
+		postedMessage.Text != slack.AgentRequestFailureMessage {
+		t.Fatalf("Slack runtime message = %+v", postedMessage)
 	}
 	assertDurableModelErrorForKernelTest(
 		t,
@@ -208,6 +367,85 @@ model:
 			providerResponseID,
 		)
 	}
+}
+
+type kernelSlackRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f kernelSlackRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func attachKernelSlackTarget(
+	t *testing.T,
+	ctx context.Context,
+	fixture kernelFixture,
+	agentID, agentProfileID storage.ID,
+	identifier, providerRef string,
+) string {
+	t.Helper()
+	botToken := "xoxb-" + identifier
+	secret, _, err := fixture.Store.Secrets().CreateSecret(
+		ctx,
+		secretstore.CreateSecretInput{
+			OrgID:          kernelTestOrgID,
+			OwnerKind:      secretstore.SecretOwnerProject,
+			OwnerProjectID: kernelTestProjectID,
+			Name:           "kernel-" + identifier + "-integration-credentials",
+			Material: secrets.SlackAppCredentialsMaterial{
+				AccessToken:   botToken,
+				ClientID:      "client-id",
+				ClientSecret:  "client-secret",
+				SigningSecret: "signing-secret",
+			},
+			Actor: kernelTestUserPrincipal(kernelTestUserID),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create integration credential secret: %v", err)
+	}
+	install, err := fixture.Store.Integrations().UpsertIntegrationInstall(
+		ctx,
+		integrationstore.UpsertIntegrationInstallInput{
+			OrgID:              kernelTestOrgID,
+			ProjectID:          kernelTestProjectID,
+			AgentProfileID:     agentProfileID,
+			InstalledByUserID:  kernelTestUserID,
+			Provider:           integrationstore.IntegrationProviderSlack,
+			IntegrationKind:    slack.IntegrationKindAgentProfile,
+			ConnectionMode:     slack.ConnectionModeWebhook,
+			State:              integrationstore.IntegrationInstallStateActive,
+			ProviderTenantID:   "T_" + identifier,
+			ProviderAccountRef: "A_" + identifier,
+			CredentialSecretID: secret.ID,
+			ProviderIdentity:   json.RawMessage(`{"bot_user_id":"B_KERNEL_TEST"}`),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create integration install: %v", err)
+	}
+	target, err := fixture.Store.Integrations().CreateIntegrationTarget(
+		ctx,
+		integrationstore.CreateIntegrationTargetInput{
+			ProjectID:            kernelTestProjectID,
+			AgentID:              agentID,
+			IntegrationInstallID: install.ID,
+			ProviderRef:          providerRef,
+			ProviderRefKind:      "thread",
+		},
+	)
+	if err != nil {
+		t.Fatalf("create integration target: %v", err)
+	}
+	if err := storagetest.SeedAgentIntegrationTarget(
+		ctx,
+		fixture.Pool,
+		kernelTestProjectID,
+		agentID,
+		target.ID,
+	); err != nil {
+		t.Fatalf("set current integration target: %v", err)
+	}
+	return botToken
 }
 
 func TestAgentExecutorSettlesTurnWhenConfiguredModelWasDeleted(t *testing.T) {

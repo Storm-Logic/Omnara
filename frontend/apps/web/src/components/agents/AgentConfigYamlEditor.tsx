@@ -103,6 +103,7 @@ export function AgentConfigYamlEditor({
     editorRef.current = monaco.editor.create(editorElementRef.current, {
       model,
       ariaLabel: agentConfigYamlAriaLabel(initialReadOnlyRef.current),
+      ariaRequired: !initialReadOnlyRef.current,
       automaticLayout: true,
       fontFamily: 'var(--font-mono)',
       fontSize: 12,
@@ -161,6 +162,7 @@ export function AgentConfigYamlEditor({
   useEffect(() => {
     editorRef.current?.updateOptions({
       ariaLabel: agentConfigYamlAriaLabel(readOnly),
+      ariaRequired: !readOnly,
       readOnly,
     })
   }, [readOnly])
@@ -170,7 +172,7 @@ export function AgentConfigYamlEditor({
       id={id}
       ref={editorElementRef}
       className={cn(
-        'border-input bg-background shadow-xs h-[28rem] overflow-hidden rounded-md border text-xs',
+        'border-input bg-background h-[28rem] overflow-hidden rounded-md border text-xs',
         className,
       )}
     />

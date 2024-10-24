@@ -17,6 +17,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/listing"
+	"github.com/omnara-ai/omnara/internal/storage/management"
 	"github.com/omnara-ai/omnara/internal/storage/modelstore"
 	"github.com/omnara-ai/omnara/internal/storage/patch"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
@@ -386,6 +387,17 @@ func TestModelProviderConfigStorageLifecycle(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create configured model: %v", err)
+	}
+	if configuredModel.ManagementKind != management.Tenant {
+		t.Fatalf("configured model management kind = %q, want tenant", configuredModel.ManagementKind)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE configured_models SET management_kind = 'cluster' WHERE org_id = $1 AND id = $2`,
+		configuredModel.OrgID,
+		configuredModel.ID,
+	); !isPgCode(err, "25006") {
+		t.Fatalf("update configured model management kind error = %v, want SQLSTATE 25006", err)
 	}
 	if _, err := store.Models().CreateConfiguredModel(ctx, modelstore.CreateConfiguredModelInput{
 		OrgID:                 testOrgID,
@@ -805,8 +817,8 @@ model:
 		ConfiguredModelID:      configuredModel.ID,
 		MaxOutputTokens:        intPtr(48000),
 		DefaultMaxOutputTokens: intPtr(24000),
-	}); !errors.Is(err, storeerr.ErrIdempotencyConflict) {
-		t.Fatalf("conflicting project model grant replay error = %v, want ErrIdempotencyConflict", err)
+	}); !errors.Is(err, storeerr.ErrConflict) {
+		t.Fatalf("conflicting project model grant replay error = %v, want ErrConflict", err)
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO project_model_grants(

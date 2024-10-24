@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/omnara-ai/omnara/internal/harness/tools"
+	"github.com/omnara-ai/omnara/internal/integration/slack"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/modelcontext"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
@@ -33,6 +36,19 @@ func TestAgentExecutorAppliesManagedWorkAdmissionAtModelClaim(t *testing.T) {
 		now,
 		kernelConfiguredModelOptions{},
 	)
+	agent, err := fixture.Store.Execution().GetAgentInProject(ctx, kernelTestProjectID, agentID)
+	if err != nil {
+		t.Fatalf("load managed-admission agent: %v", err)
+	}
+	attachKernelSlackTarget(
+		t,
+		ctx,
+		fixture,
+		agentID,
+		agent.AgentProfileID,
+		"managed-admission",
+		"C_MANAGED_ADMISSION:1.0",
+	)
 	turn := fixture.admitContentInputTurn(
 		t,
 		ctx,
@@ -50,14 +66,37 @@ func TestAgentExecutorAppliesManagedWorkAdmissionAtModelClaim(t *testing.T) {
 		}},
 	}
 	resolver := &selectionRecordingResolver{client: modelClient}
+	postCount := 0
+	integrationHTTPClient := &http.Client{Transport: kernelSlackRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			postCount++
+			if req.URL.Path != "/api/chat.postMessage" {
+				t.Fatalf("Slack runtime message path = %q", req.URL.Path)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"ok":true,"channel":"C_MANAGED_ADMISSION","ts":"2.0"}`,
+				)),
+				Request: req,
+			}, nil
+		},
+	)}
 	executor := AgentExecutor{
 		Store:         fixture.Store,
 		ModelResolver: resolver,
-		ToolExecutor:  tools.Executor{Store: fixture.Store},
-		Now:           func() time.Time { return now.Add(2 * time.Millisecond) },
+		ToolExecutor: tools.Executor{
+			Store:                 fixture.Store,
+			IntegrationHTTPClient: integrationHTTPClient,
+		},
+		Now: func() time.Time { return now.Add(2 * time.Millisecond) },
 	}
 	if err := executor.ExecuteModelWork(ctx, turn); err != nil {
 		t.Fatalf("execute denied managed model work: %v", err)
+	}
+	if postCount != 1 {
+		t.Fatalf("Slack runtime message post count = %d, want 1", postCount)
 	}
 	if len(resolver.selections) != 0 || modelClient.preparedCount() != 0 || modelClient.respondedCount() != 0 {
 		t.Fatalf(
@@ -342,7 +381,104 @@ LIMIT 1
 	}
 }
 
-func TestAgentExecutorAppliesAgentModelOptionsToRequestPolicy(t *testing.T) {
+func TestAgentExecutorRecordsOutputLimitConflictBeforeProviderPreparation(t *testing.T) {
+	ctx := context.Background()
+	fixture := newKernelFixture(t, ctx)
+	now := fixture.Now
+	agentID, userID := fixture.createAgent(t, ctx, "openai/output-limit-conflict", now)
+	turn := fixture.admitContentInputTurn(
+		t,
+		ctx,
+		agentID,
+		userID,
+		"exercise deterministic output policy validation",
+		now.Add(time.Millisecond),
+	)
+	baseClient := &sequenceKernelModel{providerModelSlug: "output-limit-conflict"}
+	modelClient := &outputLimitKernelModel{
+		sequenceKernelModel: baseClient,
+		minimumOutputTokens: baseClient.Capabilities().MaxOutputTokens + 1,
+	}
+	executor := AgentExecutor{
+		Store:         fixture.Store,
+		ModelResolver: liveTestModelResolver(fixture.Store, modelClient),
+		ToolExecutor:  tools.Executor{Store: fixture.Store},
+		Now:           func() time.Time { return now.Add(2 * time.Millisecond) },
+	}
+	if err := executor.ExecuteModelWork(ctx, turn); err != nil {
+		t.Fatalf("execute turn with output-limit conflict: %v", err)
+	}
+
+	var contextState executionstore.ModelCallState
+	var recoveryKind executionstore.ModelCallRecoveryKind
+	var errorKind, errorCode, outputStopReason, blockKind, blockText string
+	var outputCount, blockCount int
+	if err := fixture.Pool.QueryRow(ctx, `
+SELECT context.state, COALESCE(context.recovery_kind::text, ''), context.error_kind, context.error_code,
+       output.stop_reason, count(DISTINCT output.id)::integer,
+       count(block.id)::integer, min(block.block_kind), min(block.text_content)
+FROM model_call_contexts context
+JOIN model_outputs output ON output.agent_id = context.agent_id
+  AND output.model_call_context_id = context.id
+JOIN content_blocks block ON block.agent_id = output.agent_id
+  AND block.owner_model_output_id = output.id
+WHERE context.project_id = $1
+  AND context.agent_id = $2
+  AND context.input_event_sequence = $3
+GROUP BY context.id, output.stop_reason
+ORDER BY context.attempt_number DESC
+LIMIT 1
+`, kernelTestProjectID, agentID, turn.OpeningEventSequence).Scan(
+		&contextState,
+		&recoveryKind,
+		&errorKind,
+		&errorCode,
+		&outputStopReason,
+		&outputCount,
+		&blockCount,
+		&blockKind,
+		&blockText,
+	); err != nil {
+		t.Fatalf("inspect output-limit conflict: %v", err)
+	}
+	if contextState != executionstore.ModelCallContextFailed || recoveryKind != "" ||
+		errorKind != string(model.ErrorKindInvalidRequest) ||
+		errorCode != model.OutputTokenLimitIncompatibleCode || outputStopReason != "error" ||
+		outputCount != 1 || blockCount != 1 || blockKind != "error" ||
+		!strings.Contains(blockText, model.ErrOutputTokenLimitIncompatible.Error()) ||
+		!strings.Contains(blockText, "must be at least") ||
+		modelClient.validationCalls != 1 || baseClient.preparedCount() != 0 ||
+		baseClient.respondedCount() != 0 {
+		t.Fatalf(
+			"output-limit state=%q recovery=%q error=%s/%s output=%s/%d block=%s/%q/%d validation=%d prepare=%d respond=%d",
+			contextState,
+			recoveryKind,
+			errorKind,
+			errorCode,
+			outputStopReason,
+			outputCount,
+			blockKind,
+			blockText,
+			blockCount,
+			modelClient.validationCalls,
+			baseClient.preparedCount(),
+			baseClient.respondedCount(),
+		)
+	}
+}
+
+type outputLimitKernelModel struct {
+	*sequenceKernelModel
+	minimumOutputTokens int
+	validationCalls     int
+}
+
+func (m *outputLimitKernelModel) OutputTokenLimits() (model.OutputTokenLimits, error) {
+	m.validationCalls++
+	return model.OutputTokenLimits{Minimum: m.minimumOutputTokens}, nil
+}
+
+func TestAgentExecutorAppliesCompiledModelOverridesToRequestPolicy(t *testing.T) {
 	ctx := context.Background()
 	fixture := newKernelFixture(t, ctx)
 	now := fixture.Now
@@ -397,12 +533,12 @@ model:
 		t.Fatalf("resolver selections = %d, want 1", len(resolver.selections))
 	}
 	selection := resolver.selections[0]
-	if selection.Options.DefaultMaxOutputTokens == nil || *selection.Options.DefaultMaxOutputTokens != 1234 ||
-		selection.Options.CacheRetention != model.CacheRetentionShort {
-		t.Fatalf("selection options = %+v", selection.Options)
+	if selection.Overrides.DefaultMaxOutputTokens == nil || *selection.Overrides.DefaultMaxOutputTokens != 1234 ||
+		selection.Overrides.CacheRetention != string(model.CacheRetentionShort) {
+		t.Fatalf("selection overrides = %+v", selection.Overrides)
 	}
-	if selection.Options.ContextWindowTokens == nil || *selection.Options.ContextWindowTokens != 64000 {
-		t.Fatalf("selection token options = %+v", selection.Options)
+	if selection.Overrides.ContextWindowTokens == nil || *selection.Overrides.ContextWindowTokens != 64000 {
+		t.Fatalf("selection token overrides = %+v", selection.Overrides)
 	}
 	if modelClient.preparedCount() != 1 {
 		t.Fatalf("prepared requests = %d, want 1", modelClient.preparedCount())
@@ -601,6 +737,19 @@ func TestAgentExecutorStopsSerializedProviderRequestOverflowWhenOpeningIsIrreduc
 	fixture := newKernelFixture(t, ctx)
 	now := fixture.Now
 	agentID, userID := fixture.createAgent(t, ctx, "openai/serialized-overflow-model", now)
+	agent, err := fixture.Store.Execution().GetAgentInProject(ctx, kernelTestProjectID, agentID)
+	if err != nil {
+		t.Fatalf("load irreducible-overflow agent: %v", err)
+	}
+	attachKernelSlackTarget(
+		t,
+		ctx,
+		fixture,
+		agentID,
+		agent.AgentProfileID,
+		"irreducible-overflow",
+		"C_IRREDUCIBLE_OVERFLOW:1.0",
+	)
 	turn := fixture.admitContentInputTurn(t, ctx, agentID, userID, "hello", now.Add(time.Millisecond))
 	modelClient := &sequenceKernelModel{
 		providerModelSlug:          "serialized-overflow-model",
@@ -611,14 +760,50 @@ func TestAgentExecutorStopsSerializedProviderRequestOverflowWhenOpeningIsIrreduc
 			StopReason: model.StopReasonEndTurn,
 		}},
 	}
+	postCount := 0
+	postedText := ""
+	var postedDecodeErr error
+	integrationHTTPClient := &http.Client{Transport: kernelSlackRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			postCount++
+			if req.URL.Path != "/api/chat.postMessage" {
+				t.Fatalf("Slack runtime message path = %q", req.URL.Path)
+			}
+			var postedMessage struct {
+				Text string `json:"text"`
+			}
+			postedDecodeErr = json.NewDecoder(req.Body).Decode(&postedMessage)
+			postedText = postedMessage.Text
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"ok":true,"channel":"C_IRREDUCIBLE_OVERFLOW","ts":"2.0"}`,
+				)),
+				Request: req,
+			}, nil
+		},
+	)}
 	executor := AgentExecutor{
 		Store:         fixture.Store,
 		ModelResolver: liveTestModelResolver(fixture.Store, modelClient),
-		ToolExecutor:  tools.Executor{Store: fixture.Store},
-		Now:           func() time.Time { return now.Add(2 * time.Millisecond) },
+		ToolExecutor: tools.Executor{
+			Store:                 fixture.Store,
+			IntegrationHTTPClient: integrationHTTPClient,
+		},
+		Now: func() time.Time { return now.Add(2 * time.Millisecond) },
 	}
 	if err := executor.ExecuteModelWork(ctx, turn); err != nil {
 		t.Fatalf("execute turn: %v", err)
+	}
+	if postedDecodeErr != nil {
+		t.Fatalf("decode Slack runtime message: %v", postedDecodeErr)
+	}
+	if postCount != 1 {
+		t.Fatalf("Slack runtime message post count = %d, want 1", postCount)
+	}
+	if postedText != slack.AgentRequestFailureMessage {
+		t.Fatalf("Slack runtime message text = %q", postedText)
 	}
 	if len(modelClient.respondHadSink) != 0 {
 		t.Fatalf("provider respond calls = %d, want none", len(modelClient.respondHadSink))
@@ -655,29 +840,30 @@ WHERE context.project_id = $1
 		)
 	}
 	var details struct {
-		ProviderMetadata struct {
-			CompactionTrigger struct {
-				Kind    string          `json:"kind"`
-				Code    string          `json:"code"`
-				Message string          `json:"message"`
-				Details json.RawMessage `json:"details"`
-			} `json:"compaction_trigger"`
-		} `json:"provider_metadata"`
+		CompactionTrigger struct {
+			Kind    string          `json:"kind"`
+			Code    string          `json:"code"`
+			Message string          `json:"message"`
+			Details json.RawMessage `json:"details"`
+		} `json:"compaction_trigger"`
 	}
 	if err := json.Unmarshal(errorDetails, &details); err != nil {
 		t.Fatalf("decode serialized overflow details: %v", err)
 	}
-	trigger := details.ProviderMetadata.CompactionTrigger
+	trigger := details.CompactionTrigger
 	var triggerDetails struct {
-		Source string `json:"source"`
+		Source           string                      `json:"source"`
+		RequestAdmission model.InputBudgetAssessment `json:"request_admission"`
 	}
 	if err := json.Unmarshal(trigger.Details, &triggerDetails); err != nil {
 		t.Fatalf("decode serialized overflow trigger details: %v", err)
 	}
 	if trigger.Kind != string(model.ErrorKindContextWindow) ||
-		trigger.Code != "prepared_request_budget_overflow" ||
-		trigger.Message != "The serialized provider request exceeds the configured input budget." ||
-		triggerDetails.Source != "openai-responses" {
+		trigger.Code != "configured_input_budget_exceeded" ||
+		!strings.Contains(trigger.Message, "exceeding the configured budget") ||
+		triggerDetails.Source != "openai-responses" ||
+		triggerDetails.RequestAdmission.EstimatedInputTokens <=
+			triggerDetails.RequestAdmission.UsableInputTokens {
 		t.Fatalf(
 			"serialized overflow compaction trigger = %+v source=%q",
 			trigger,
@@ -1045,7 +1231,7 @@ WHERE context.project_id = $1
 		t.Fatalf("load compactable serialized overflow attempt: %v", err)
 	}
 	if state != executionstore.ModelCallContextFailed || recoveryKind != executionstore.ModelCallRecoveryCompact ||
-		errorCode != "prepared_request_budget_overflow" {
+		errorCode != "configured_input_budget_exceeded" {
 		t.Fatalf(
 			"compactable serialized overflow attempt = %q/%q/%q",
 			state,

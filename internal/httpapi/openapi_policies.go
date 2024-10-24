@@ -101,6 +101,11 @@ const (
 	operationCreateProjectMachinePoolGrant operationID = "CreateProjectMachinePoolGrant"
 	operationCreateProjectModelGrant       operationID = "CreateProjectModelGrant"
 	operationCreateSlackSetup              operationID = "CreateSlackSetup"
+	operationCreateCronTrigger             operationID = "CreateCronTrigger"
+	operationListCronTriggers              operationID = "ListCronTriggers"
+	operationGetCronTrigger                operationID = "GetCronTrigger"
+	operationUpdateCronTrigger             operationID = "UpdateCronTrigger"
+	operationDeleteCronTrigger             operationID = "DeleteCronTrigger"
 	operationDeclineInvitation             operationID = "DeclineInvitation"
 	operationArchiveAgent                  operationID = "ArchiveAgent"
 	operationDeleteAgentProfile            operationID = "DeleteAgentProfile"
@@ -167,6 +172,7 @@ const (
 	operationRegisterMachineDaemonRuntime  operationID = "RegisterMachineDaemonRuntime"
 	operationRecordMachineFailure          operationID = "RecordMachineFailure"
 	operationRemoveMemberProjectAccess     operationID = "RemoveMemberProjectAccess"
+	operationRenameAgentProfile            operationID = "RenameAgentProfile"
 	operationRemoveOrgMember               operationID = "RemoveOrgMember"
 	operationResolveAgentInteraction       operationID = "ResolveAgentInteraction"
 	operationRevokeMachineDaemonToken      operationID = "RevokeMachineDaemonToken"
@@ -302,9 +308,15 @@ var openAPIOperationPolicies = map[operationID]operationPolicy{
 	operationDeleteIntegrationInstall:      accountPolicy(projectScope(identitystore.ProjectActionManage)),
 	operationCreateAgentProfile:            accountPolicy(projectScope(identitystore.ProjectActionManage)),
 	operationUpdateAgentProfile:            accountPolicy(projectScope(identitystore.ProjectActionManage)),
+	operationRenameAgentProfile:            accountPolicy(projectScope(identitystore.ProjectActionManage)),
 	operationDeleteAgentProfile:            accountPolicy(projectScope(identitystore.ProjectActionManage)),
 	operationCreateIntegrationOAuthSetup:   userPolicy(projectScope(identitystore.ProjectActionManage)),
 	operationCreateSlackSetup:              userPolicy(projectScope(identitystore.ProjectActionManage)),
+	operationCreateCronTrigger:             accountPolicy(projectScope(identitystore.ProjectActionManage)),
+	operationUpdateCronTrigger:             accountPolicy(projectScope(identitystore.ProjectActionManage)),
+	operationDeleteCronTrigger:             accountPolicy(projectScope(identitystore.ProjectActionManage)),
+	operationGetCronTrigger:                accountPolicy(projectScope(identitystore.ProjectActionRead)),
+	operationListCronTriggers:              accountPolicy(projectScope(identitystore.ProjectActionRead)),
 	operationGetAgentConfig:                accountPolicy(projectScope(identitystore.ProjectActionRead)),
 	operationGetToolCatalog:                accountPolicy(noScope()),
 	operationGetAgentProfile:               accountPolicy(projectScope(identitystore.ProjectActionRead)),

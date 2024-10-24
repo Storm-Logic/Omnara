@@ -1,8 +1,8 @@
 import { useCreateSkill } from '@omnara/react'
 import type { SkillOwnerInput } from '@omnara/sdk'
-import { FileArchive } from 'lucide-react'
 import { type SyntheticEvent, useId, useState } from 'react'
 
+import { FileArchive } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -14,7 +14,6 @@ import {
 } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/submit-status'
 
 export function CreateSkillDialog({
@@ -99,8 +98,11 @@ export function CreateSkillDialog({
               </p>
             )}
             <DialogFooter>
-              <Button type="submit" disabled={!archive || createSkill.isPending}>
-                {createSkill.isPending && <Spinner />}
+              <Button
+                type="submit"
+                disabled={!archive || createSkill.isPending}
+                loading={createSkill.isPending}
+              >
                 Upload skill
               </Button>
             </DialogFooter>

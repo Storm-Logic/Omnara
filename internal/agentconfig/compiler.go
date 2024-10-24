@@ -60,6 +60,26 @@ type ModelReasoningCompiled struct {
 	Effort string `json:"effort"`
 }
 
+type ModelOverrides struct {
+	ContextWindowTokens    *int
+	DefaultMaxOutputTokens *int
+	CacheRetention         string
+	ReasoningEffort        string
+}
+
+func (m ModelCompiled) Overrides() ModelOverrides {
+	reasoningEffort := ""
+	if m.Reasoning != nil {
+		reasoningEffort = m.Reasoning.Effort
+	}
+	return ModelOverrides{
+		ContextWindowTokens:    m.ContextWindowTokens,
+		DefaultMaxOutputTokens: m.DefaultMaxOutputTokens,
+		CacheRetention:         m.CacheRetention,
+		ReasoningEffort:        reasoningEffort,
+	}
+}
+
 type compiledModelResult struct {
 	configuredModelID    string
 	model                ModelCompiled
@@ -73,6 +93,7 @@ type MachineSourceCompiled struct {
 	MachinePoolID                 string                     `json:"machine_pool_id,omitempty"`
 	MaxMachines                   int                        `json:"max_machines,omitempty"`
 	InitialNumMachines            int                        `json:"initial_num_machines,omitempty"`
+	DeleteAfterIdleMinutes        *int                       `json:"delete_after_idle_minutes,omitempty"`
 	Cwd                           string                     `json:"cwd,omitempty"`
 	MachineCPU                    *int                       `json:"machine_cpu,omitempty"`
 	MachineMemoryMB               *int                       `json:"machine_memory_mb,omitempty"`
@@ -450,6 +471,12 @@ func compileMachineSource(
 				index,
 			)
 		}
+		if source.DeleteAfterIdleMinutes != nil {
+			return MachineSourceCompiled{}, fmt.Errorf(
+				"machine_sources[%d].delete_after_idle_minutes is only valid for machine_pool_name sources",
+				index,
+			)
+		}
 		machineID, err := resolveMachineSourceMachineName(machineName, index, opts.ResolveMachineName)
 		if err != nil {
 			return MachineSourceCompiled{}, err
@@ -474,6 +501,7 @@ func compileMachineSource(
 		MachinePoolID:                 machinePoolID,
 		MaxMachines:                   maxMachines,
 		InitialNumMachines:            initialNumMachines,
+		DeleteAfterIdleMinutes:        source.DeleteAfterIdleMinutes,
 		Cwd:                           cwd,
 		MachineCPU:                    source.MachineCPU,
 		MachineMemoryMB:               source.MachineMemoryMB,

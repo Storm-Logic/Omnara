@@ -20,6 +20,7 @@ const (
 	KindAgent                   Kind = "agent"
 	KindAgentConfig             Kind = "agent_config"
 	KindAgentProfile            Kind = "agent_profile"
+	KindCronTrigger             Kind = "cron_trigger"
 	KindIntegrationInstall      Kind = "integration_install"
 	KindIntegrationTarget       Kind = "integration_target"
 	KindAgentEvent              Kind = "agent_event"
@@ -51,6 +52,8 @@ const (
 	KindSkillRevision           Kind = "skill_revision"
 	KindSkillGrant              Kind = "skill_grant"
 	KindOrgAPIKey               Kind = "org_api_key"
+	KindMCPOAuthFlow            Kind = "mcp_oauth_flow"
+	KindIntegrationOAuthFlow    Kind = "integration_oauth_flow"
 )
 
 var kindPrefixes = map[Kind]string{
@@ -62,6 +65,7 @@ var kindPrefixes = map[Kind]string{
 	KindAgent:                   "agt",
 	KindAgentConfig:             "acfg",
 	KindAgentProfile:            "aprf",
+	KindCronTrigger:             "cron",
 	KindIntegrationInstall:      "iin",
 	KindIntegrationTarget:       "itgt",
 	KindAgentEvent:              "evt",
@@ -93,6 +97,8 @@ var kindPrefixes = map[Kind]string{
 	KindSkillRevision:           "skr",
 	KindSkillGrant:              "skg",
 	KindOrgAPIKey:               "oak",
+	KindMCPOAuthFlow:            "moaf",
+	KindIntegrationOAuthFlow:    "ioaf",
 }
 
 var encoding = base32.StdEncoding.WithPadding(base32.NoPadding)

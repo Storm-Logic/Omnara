@@ -2,7 +2,7 @@
   "name": "@omnara/frontend",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=22"
   },
@@ -11,6 +11,7 @@
     "build": "pnpm --filter @omnara/web build",
     "preview": "pnpm --filter @omnara/web preview",
     "generate:api": "pnpm --filter @omnara/sdk generate:api",
+    "doctor": "npx --yes react-doctor@latest . --project \"*\" --scope changed --blocking warning",
     "test": "pnpm -r --if-present test",
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint . --max-warnings=0",

@@ -16,7 +16,7 @@ Most importantly, **the machine does not own the agent**. Agents live in the con
 | --- | --- | --- |
 | What it is | A computer you already have, registered by installing the daemon | Capacity provisioned on demand from Blaxel, Unikraft Cloud, or Daytona |
 | Created by | You, via the [install flow](/machines/connect) | Omnara, when an agent needs one |
-| Lifetime | Yours to manage | Created on demand — at launch or mid-conversation — and deleted when released |
+| Lifetime | Yours to manage | Created on demand — at launch or mid-conversation — and deleted when released or after a configured idle period |
 | Best for | Access to things only your infra can reach — mounts, internal networks, GPUs | Disposable, scale-to-zero execution |
 | `source_kind` | `byo` | `pool` |
 
@@ -27,11 +27,11 @@ The [mounted storage example](/examples/mounted-storage) is the canonical BYO st
 Every machine reports two independent states:
 
 - **`lifecycle_state`** tracks whether the machine is being provisioned, active, being deleted, or deleted. It also reports provisioning and deletion failures.
-- **`connection_state`** reports whether its daemon is currently `online` or `offline`.
+- **`connection_state`** reports whether the machine is currently `online`, `asleep`, or `offline`.
 
 An `active` machine can be `offline`, for example when someone closes a laptop. New commands fail with a retryable error. A process may continue on the machine, but the agent cannot interact with it until the daemon reconnects. After a grace period, tool calls waiting on that process return a retryable `machine_unreachable` result.
 
-A machine is available to an agent only when its binding is attached, its lifecycle is `active`, and its daemon is `online`. The [`inspect_machine`](/tools/built-in#list_machines--inspect_machine) tool reports this as `executable`.
+A machine is available to an agent only when its binding is attached, its project grant still exists, its lifecycle is `active`, and its daemon is `online` or the machine is asleep and can be woken. The [`inspect_machine`](/tools/built-in#list_machines--inspect_machine) tool reports this as `executable`.
 
 ## Who may use a machine
 

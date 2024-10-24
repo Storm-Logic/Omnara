@@ -1,5 +1,4 @@
-import { Plus, X } from 'lucide-react'
-
+import { Plus, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
@@ -38,7 +37,9 @@ export function OAuthTokenFields({
               }}
             >
               <SelectTrigger className="w-2/5">
-                <SelectValue />
+                <SelectValue>
+                  {oauthKeys.find((option) => option.value === entry.key)?.label ?? entry.key}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {oauthKeys.map((option) =>

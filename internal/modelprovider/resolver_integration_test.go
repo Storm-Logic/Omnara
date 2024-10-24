@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/model/anthropicmessages"
 	"github.com/omnara-ai/omnara/internal/model/openaichatcompletions"
@@ -77,17 +78,28 @@ func TestResolverUsesClusterManagedDefaultProvider(t *testing.T) {
 	}
 	orgID := uuid.New()
 	created, err := store.Organizations().CreateOrgForUser(ctx, orglifecycle.CreateOrgForUserInput{
-		OrgID:          orgID,
-		UserID:         user.ID,
-		Name:           "Cluster Resolver Org",
-		IdempotencyKey: "cluster-resolver-org",
-		DefaultModelProvider: &modelstore.ProvisionedDefaultModelProvider{
+		OrgID:                         orgID,
+		UserID:                        user.ID,
+		Name:                          "Cluster Resolver Org",
+		IdempotencyKey:                "cluster-resolver-org",
+		ProvisionDefaultModelProvider: true,
+	})
+	if err != nil {
+		t.Fatalf("create org for cluster default provider: %v", err)
+	}
+	claim, found, err := store.Organizations().ClaimDefaultModelProviderProvisioning(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim cluster default provider provisioning: found=%t err=%v", found, err)
+	}
+	if err := store.Organizations().CompleteDefaultModelProviderProvisioning(
+		ctx,
+		orglifecycle.CompleteDefaultModelProviderProvisioningInput{
+			Claim:           claim,
 			Template:        template,
 			CredentialValue: "sk-cluster-resolver",
 		},
-	})
-	if err != nil {
-		t.Fatalf("create org with cluster default provider: %v", err)
+	); err != nil {
+		t.Fatalf("complete cluster default provider provisioning: %v", err)
 	}
 	provider, err := store.Models().GetModelProviderConfigByName(
 		ctx,
@@ -318,10 +330,10 @@ func TestResolverMaterializesConfiguredModelRevisionAndCredential(t *testing.T) 
 		OrgID:                     created.Org.ID.String(),
 		ProjectID:                 created.Project.ID.String(),
 		ConfiguredModelRevisionID: configuredModel.CurrentRevisionID.String(),
-		Options: model.SelectionOptions{
+		Overrides: agentconfig.ModelOverrides{
 			ContextWindowTokens:    &agentContextWindow,
 			DefaultMaxOutputTokens: &agentMaxOutput,
-			CacheRetention:         model.CacheRetentionShort,
+			CacheRetention:         string(model.CacheRetentionShort),
 			ReasoningEffort:        "high",
 		},
 	})

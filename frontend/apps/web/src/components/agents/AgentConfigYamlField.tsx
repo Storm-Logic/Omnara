@@ -2,7 +2,7 @@ import { CatchBoundary } from '@tanstack/react-router'
 import { lazy, Suspense } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Field, FieldLabel } from '@/components/ui/field'
+import { Field, RequiredFieldLabel } from '@/components/ui/field'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
 
@@ -25,7 +25,7 @@ function AgentConfigYamlEditorFallback({
     <div
       id={id}
       className={cn(
-        'border-input bg-background shadow-xs flex h-[28rem] items-center justify-center overflow-hidden rounded-md border text-xs',
+        'border-input bg-background flex h-[28rem] items-center justify-center overflow-hidden rounded-md border text-xs',
         className,
       )}
       role="status"
@@ -76,10 +76,10 @@ export function AgentConfigYamlField({
   if (hideLabel) return editor
 
   return (
-    <Field>
-      <FieldLabel asChild>
+    <Field className="min-h-0 flex-1">
+      <RequiredFieldLabel asChild>
         <span>Config (YAML)</span>
-      </FieldLabel>
+      </RequiredFieldLabel>
       {editor}
     </Field>
   )

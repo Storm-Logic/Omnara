@@ -16,7 +16,7 @@ Omnara is model-agnostic: you bring a provider API key, and agents use the model
 <Tab title="Console">
   1. Under **Models** in the sidebar, click **New provider**. Pick a provider and name it. This guide uses OpenAI with the name `openai-prod`.
   2. Create the credential secret inline (**New secret**) with your provider API key, then click **Add provider**.
-  3. In the **Add models** step, select `gpt-5.6` and create it. Models added this way are prefixed with the provider name, so it lands under **Configured models** as `openai-prod - gpt-5.6`.
+  3. In the **Add models** step, select `gpt-5.6` and create it. The detected slug is used as its configured name, so it lands under **Configured models** as `gpt-5.6`.
   4. Grant the model to your project: on the model's row, click **Grant to project** and pick your project.
 </Tab>
 <Tab title="API">
@@ -39,7 +39,7 @@ Omnara is model-agnostic: you bring a provider API key, and agents use the model
         information, cite sources, and ask for clarification when needed.
       model:
         provider_config: openai-prod
-        name: openai-prod - gpt-5.6
+        name: gpt-5.6
       tools:
         web_search: {}
         web_fetch: {}
@@ -48,9 +48,7 @@ Omnara is model-agnostic: you bring a provider API key, and agents use the model
 
       `model.name` must match a configured model exactly, as shown on the **Models** page — substitute yours if it's named differently.
 
-      In **Agent name (optional)**, enter `Research assistant`.
-
-      In **First message (optional)**, give it the task:
+      In **Name**, enter `Research assistant`, then click **Create & launch agent**. In the conversation composer, send this task:
 
       ```text
       Find the Omnara blog post "The Log Is the Agent." Before summarizing it, use
@@ -59,7 +57,7 @@ Omnara is model-agnostic: you bring a provider API key, and agents use the model
       takeaways, and link to the post.
       ```
 
-      Click **Create agent**. The console validates the config, launches the agent, and drops you into its conversation view.
+      The agent starts working as soon as you send the message.
     </Step>
     <Step title="Answer the scope question">
       The agent pauses and an **Agent question** card appears in the conversation. Choose an option and click **Submit**. The agent resumes immediately.
@@ -116,14 +114,14 @@ Omnara is model-agnostic: you bring a provider API key, and agents use the model
         information, cite sources, and ask for clarification when needed.
       model:
         provider_config: openai-prod
-        name: openai-prod - gpt-5.6
+        name: gpt-5.6
       tools:
         web_search: {}
         web_fetch: {}
         ask_question: {}
       ```
 
-      `model.name` must match a configured model exactly — this guide uses the console-created name `openai-prod - gpt-5.6`; substitute yours if it differs.
+      `model.name` must match a configured model exactly — this guide uses the console-created name `gpt-5.6`; substitute yours if it differs.
 
       Create the config and save its ID:
 

@@ -44,7 +44,7 @@ func (p protocol) BuildRequest(ctx context.Context, input model.PrepareInput) (j
 	}
 	messages, err := buildMessages(
 		input.Context,
-		input.Policy.CacheRetention,
+		input.Policy,
 		model.ProviderReplayIdentityForClient(c.ModelProviderConfigID, c),
 	)
 	if err != nil {
@@ -167,7 +167,7 @@ func systemContent(bundle modelcontext.Bundle, retention model.CacheRetention) a
 
 func buildMessages(
 	bundle modelcontext.Bundle,
-	retention model.CacheRetention,
+	policy model.RequestPolicy,
 	replayIdentity modelenvelope.ProviderReplayIdentity,
 ) ([]message, error) {
 	history, err := modelcontext.CanonicalHistory(bundle)
@@ -184,7 +184,7 @@ func buildMessages(
 		block := textBlock{
 			Type:         "text",
 			Text:         modelcontext.ProjectedCheckpointContent(*checkpoint),
-			CacheControl: cacheControl(retention),
+			CacheControl: cacheControl(policy.CacheRetention),
 		}
 		messages = appendMessageBlocks(messages, anthropicRoleUser, []any{block})
 	}
@@ -197,6 +197,7 @@ func buildMessages(
 				entry.AssistantContent,
 				entry.ToolResults,
 				replayIdentity,
+				policy,
 				usedIDs,
 			)
 			if buildErr != nil {
@@ -233,17 +234,7 @@ func buildMessages(
 		}
 	}
 	if historyAdded {
-		messages = markLastMessageCacheBreakpoint(messages, cacheControl(retention))
-	}
-	if modelcontext.HasExecutionContext(bundle) {
-		messages = appendMessageBlocks(messages, anthropicRoleUser, []any{textBlock{
-			Type: "text",
-			Text: "<active_runtime_context>\n" + modelcontext.ExecutionContextContent(
-				bundle.ActiveProcesses,
-				bundle.AttachedMachines,
-			) +
-				"\n</active_runtime_context>",
-		}})
+		messages = markLastMessageCacheBreakpoint(messages, cacheControl(policy.CacheRetention))
 	}
 	if len(messages) > 0 && messages[0].Role == anthropicRoleAssistant {
 		messages = append(
@@ -355,15 +346,18 @@ func assistantTurnForEntry(
 	content []modelcontext.AssistantContentEntry,
 	group []modelcontext.ToolResultRef,
 	replayIdentity modelenvelope.ProviderReplayIdentity,
+	policy model.RequestPolicy,
 	usedIDs map[string]bool,
 ) ([]any, map[string]string, error) {
-	if blocks, toolUseIDs, ok := completeAnthropicReplay(
-		source,
-		content,
-		replayIdentity,
-		usedIDs,
-	); ok {
-		return blocks, toolUseIDs, nil
+	if policy.AllowsProviderReplay(source.Sequence) {
+		if blocks, toolUseIDs, ok := completeAnthropicReplay(
+			source,
+			content,
+			replayIdentity,
+			usedIDs,
+		); ok {
+			return blocks, toolUseIDs, nil
+		}
 	}
 	blocks := make([]any, 0, len(content))
 	toolUseIDs := make(map[string]string, len(group))

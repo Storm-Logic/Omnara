@@ -4,9 +4,9 @@ import {
   type DeviceAuthPending,
   pendingDeviceAuth,
 } from '@omnara/sdk/browser'
-import { Check, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
+import { Check, X } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import { errorMessage } from '@/lib/submit-status'
@@ -14,7 +14,7 @@ import { errorMessage } from '@/lib/submit-status'
 type DeviceAuthState =
   | { kind: 'loading' }
   | { kind: 'ready'; flow: DeviceAuthPending }
-  | { kind: 'submitting'; flow: DeviceAuthPending }
+  | { kind: 'submitting'; flow: DeviceAuthPending; decision: 'approve' | 'deny' }
   | { kind: 'approved' }
   | { kind: 'denied' }
   | { kind: 'error'; message: string }
@@ -45,7 +45,9 @@ export function DeviceAuth() {
   }, [userCode])
 
   async function submit(decision: 'approve' | 'deny') {
-    setState((prev) => (prev.kind === 'ready' ? { kind: 'submitting', flow: prev.flow } : prev))
+    setState((prev) =>
+      prev.kind === 'ready' ? { kind: 'submitting', flow: prev.flow, decision } : prev,
+    )
     try {
       if (decision === 'approve') {
         await approveDeviceAuth(userCode)
@@ -84,26 +86,24 @@ export function DeviceAuth() {
           </div>
           <div className="flex flex-wrap gap-3">
             <Button
+              loading={state.kind === 'submitting' && state.decision === 'approve'}
+              icon={<Check className="h-4 w-4" />}
               onClick={() => {
                 void submit('approve')
               }}
               disabled={state.kind === 'submitting'}
             >
-              {state.kind === 'submitting' ? (
-                <Spinner />
-              ) : (
-                <Check className="h-4 w-4" aria-hidden />
-              )}
               Approve
             </Button>
             <Button
               variant="outline"
+              loading={state.kind === 'submitting' && state.decision === 'deny'}
+              icon={<X className="h-4 w-4" />}
               onClick={() => {
                 void submit('deny')
               }}
               disabled={state.kind === 'submitting'}
             >
-              <X className="h-4 w-4" aria-hidden />
               Deny
             </Button>
           </div>

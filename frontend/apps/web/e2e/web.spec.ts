@@ -1,4 +1,4 @@
-import { expect, type Page, test } from '@playwright/test'
+import { type Cookie, expect, type Page, test } from '@playwright/test'
 
 function requiredEnvironmentVariable(name: string): string {
   const value = process.env[name]
@@ -12,6 +12,7 @@ const switchOrgName = requiredEnvironmentVariable('OMNARA_WEB_E2E_SWITCH_ORG_NAM
 const createdOrgName = 'zz web created organization'
 const adminEmail = requiredEnvironmentVariable('OMNARA_WEB_E2E_ADMIN_EMAIL')
 const viewerEmail = requiredEnvironmentVariable('OMNARA_WEB_E2E_VIEWER_EMAIL')
+const inviteeEmail = requiredEnvironmentVariable('OMNARA_WEB_E2E_INVITEE_EMAIL')
 const password = requiredEnvironmentVariable('OMNARA_WEB_E2E_PASSWORD')
 const providerConfig = requiredEnvironmentVariable('OMNARA_WEB_E2E_PROVIDER_CONFIG')
 const modelName = requiredEnvironmentVariable('OMNARA_WEB_E2E_MODEL_NAME')
@@ -42,7 +43,9 @@ function installFailureTracking(page: Page, ignore: RegExp[] = []) {
   return failures
 }
 
-async function signIn(page: Page, email: string, returnTo: string) {
+const sessionCookies = new Map<string, Cookie[]>()
+
+async function signInThroughLoginForm(page: Page, email: string, returnTo: string) {
   await page.goto(returnTo)
 
   await expect(page).toHaveURL((url) => {
@@ -55,10 +58,22 @@ async function signIn(page: Page, email: string, returnTo: string) {
   await page.getByRole('button', { name: 'Sign in' }).click()
 
   await expect(page).toHaveURL(returnTo)
+  sessionCookies.set(email, await page.context().cookies())
+}
+
+async function signIn(page: Page, email: string, returnTo: string) {
+  const cookies = sessionCookies.get(email)
+  if (cookies) {
+    await page.context().addCookies(cookies)
+    await page.goto(returnTo)
+    await expect(page).toHaveURL(returnTo)
+    return
+  }
+  await signInThroughLoginForm(page, email, returnTo)
 }
 
 async function selectConfiguredModel(page: Page) {
-  const modelPicker = page.getByRole('combobox', { name: 'Search granted models…' })
+  const modelPicker = page.getByRole('combobox', { name: 'Model' })
   await modelPicker.fill(modelName)
   await page
     .getByRole('option')
@@ -69,7 +84,7 @@ async function selectConfiguredModel(page: Page) {
 
 async function createProfile(page: Page, name: string, instruction: string) {
   await signIn(page, adminEmail, createAgentPath)
-  await page.getByLabel('Name', { exact: true }).fill(name)
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill(name)
   await page.getByLabel('Instruction').fill(instruction)
   await selectConfiguredModel(page)
   await expect(page.getByRole('button', { name: 'Create profile' })).toBeEnabled()
@@ -77,10 +92,23 @@ async function createProfile(page: Page, name: string, instruction: string) {
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/agent-profiles/aprf_[a-z2-7]+$`))
 }
 
+function uniqueName(base: string) {
+  const retry = test.info().retry
+  return retry === 0 ? base : `${base} (retry ${retry})`
+}
+
 async function typeInConfigEditor(page: Page, text: string) {
   const editor = page.getByRole('textbox', { name: 'Config (YAML)' })
   await expect(editor).toBeVisible()
   await editor.focus()
+  await page.keyboard.insertText(text)
+}
+
+async function replaceConfigEditor(page: Page, text: string) {
+  const editor = page.getByRole('textbox', { name: 'Config (YAML)' })
+  await expect(editor).toBeVisible()
+  await editor.focus()
+  await page.keyboard.press('Control+A')
   await page.keyboard.insertText(text)
 }
 
@@ -92,7 +120,7 @@ async function visitAgentsTabAndReturn(page: Page) {
 
 test('returns to a protected deep link after login', async ({ page }) => {
   const failures = installFailureTracking(page)
-  await signIn(page, adminEmail, `${createAgentPath}?source=e2e#yaml`)
+  await signInThroughLoginForm(page, adminEmail, `${createAgentPath}?source=e2e#yaml`)
   await expect(page.getByRole('button', { name: 'Create & launch agent' })).toBeVisible()
   expect(failures).toEqual([])
 })
@@ -125,6 +153,46 @@ test('creates an organization from a project page', async ({ page }) => {
   expect(failures).toEqual([])
 })
 
+test('opens and answers pending invitations outside onboarding', async ({ page }) => {
+  const failures = installFailureTracking(page)
+  await signIn(page, inviteeEmail, '/')
+
+  const pendingInvitations = page.getByRole('link', {
+    name: /^Pending invitations, [1-3]$/,
+  })
+  await expect(pendingInvitations).toBeVisible()
+  await pendingInvitations.click()
+
+  await expect(page).toHaveURL('/invitations')
+  await expect(page.getByRole('heading', { name: 'Pending invitations' })).toBeVisible()
+
+  const declineButtons = page.getByRole('button', { name: /^Decline invitation to / })
+  await expect(declineButtons.first()).toBeVisible()
+  const invitationCount = await declineButtons.count()
+  expect(invitationCount).toBeGreaterThan(0)
+
+  const invitationLabel = await declineButtons.first().getAttribute('aria-label')
+  const invitationName = invitationLabel?.replace('Decline invitation to ', '').trim()
+  if (!invitationName) throw new Error('Pending invitation organization name is missing')
+  await declineButtons.first().click()
+
+  await expect(
+    page.getByRole('button', { name: `Decline invitation to ${invitationName}` }),
+  ).toHaveCount(0)
+  await expect(declineButtons).toHaveCount(invitationCount - 1)
+
+  const acceptButton = page.getByRole('button', { name: /^Accept invitation to / }).first()
+  const acceptLabel = await acceptButton.getAttribute('aria-label')
+  const acceptedOrgName = acceptLabel?.replace('Accept invitation to ', '').trim()
+  if (!acceptedOrgName) throw new Error('Accepted invitation organization name is missing')
+  await acceptButton.click()
+
+  await expect(page).toHaveURL('/')
+  await expect(page.getByRole('button', { name: acceptedOrgName })).toBeVisible()
+
+  expect(failures).toEqual([])
+})
+
 test('creates an agent from YAML', async ({ page }) => {
   const failures = installFailureTracking(page)
   await signIn(page, adminEmail, createAgentPath)
@@ -133,18 +201,23 @@ test('creates an agent from YAML', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'YAML' })).toBeVisible()
 
   await page.getByRole('button', { name: 'YAML' }).click()
+  await expect(page.getByRole('textbox', { name: 'Config (YAML)' })).toHaveAttribute(
+    'aria-required',
+    'true',
+  )
 
-  await page.getByLabel('Name', { exact: true }).fill('YAML E2E Agent')
+  const agentName = uniqueName('YAML E2E Agent')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill(agentName)
   const yamlLines = [
     'instruction: Test agent creation from YAML.',
     `model: { provider_config: "${providerConfig}", name: "${modelName}" }`,
   ]
-  await typeInConfigEditor(page, yamlLines.join('\n'))
+  await replaceConfigEditor(page, yamlLines.join('\n'))
   await expect(page.getByRole('button', { name: 'Create & launch agent' })).toBeEnabled()
   await page.getByRole('button', { name: 'Create & launch agent' }).click()
 
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/agents/agt_[a-z2-7]+$`))
-  await expect(page.getByText('YAML E2E Agent', { exact: true })).toBeVisible()
+  await expect(page.locator('[data-slot="breadcrumb-page"]')).toHaveText(agentName)
   expect(failures).toEqual([])
 })
 
@@ -153,7 +226,30 @@ test('creates an agent with the Builder', async ({ page }) => {
   await signIn(page, adminEmail, createAgentPath)
 
   await expect(page.getByRole('button', { name: 'Builder' })).toBeVisible()
-  await page.getByLabel('Name', { exact: true }).fill('Builder Agent')
+  await expect(page.getByRole('combobox', { name: 'Model' })).toHaveAttribute(
+    'aria-required',
+    'true',
+  )
+  await expect(page.getByText('web_search', { exact: true })).toBeVisible()
+  await expect(page.getByText('web_fetch', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Toolsets' })).toHaveCount(0)
+  await expect(page.getByLabel('First message (optional)')).toHaveCount(0)
+  await expect(page.getByText('No machine sources', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('No skills attached', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('No MCP servers', { exact: true })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Add tools' }).click()
+  await expect(page.getByRole('menuitem', { name: 'skill', exact: true })).toHaveCount(0)
+  await expect(
+    page.getByRole('menuitem', { name: 'send_integration_message', exact: true }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole('menuitem', { name: 'set_integration_target', exact: true }),
+  ).toHaveCount(0)
+  await page.keyboard.press('Escape')
+
+  const agentName = uniqueName('Builder Agent')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill(agentName)
   await page.getByLabel('Instruction').fill('Use the visual Builder to create this test agent.')
   await selectConfiguredModel(page)
 
@@ -161,18 +257,15 @@ test('creates an agent with the Builder', async ({ page }) => {
   await page.getByRole('button', { name: 'Create & launch agent' }).click()
 
   await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/agents/agt_[a-z2-7]+$`))
-  await expect(page.getByText('Builder Agent', { exact: true })).toBeVisible()
+  await expect(page.locator('[data-slot="breadcrumb-page"]')).toHaveText(agentName)
   expect(failures).toEqual([])
 })
 
 test('creates a profile without launching an agent', async ({ page }) => {
   const failures = installFailureTracking(page)
-  await createProfile(
-    page,
-    'Profile Only Agent',
-    'Save this config as a profile without launching.',
-  )
-  await expect(page.getByText('Profile Only Agent').first()).toBeVisible()
+  const profileName = uniqueName('Profile Only Agent')
+  await createProfile(page, profileName, 'Save this config as a profile without launching.')
+  await expect(page.getByText(profileName).first()).toBeVisible()
   expect(failures).toEqual([])
 })
 
@@ -205,7 +298,7 @@ test('granting a model from the Builder does not create a profile or agent', asy
   })
   await signIn(page, adminEmail, createAgentPath)
 
-  await page.getByLabel('Name', { exact: true }).fill('Unintended Agent')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Unintended Agent')
   await page.getByLabel('Instruction').fill('This form must not submit from a grant dialog.')
   await selectConfiguredModel(page)
   await expect(page.getByRole('button', { name: 'Create & launch agent' })).toBeEnabled()
@@ -223,9 +316,20 @@ test('granting a model from the Builder does not create a profile or agent', asy
     }
   })
 
-  await page.getByRole('button', { name: 'Grant models' }).click()
+  const modelPicker = page.getByRole('combobox', { name: 'Model' })
+  await modelPicker.fill('Grant models')
+  const grantModelsOption = page.getByRole('option', { name: 'Grant models…' })
+  await expect(grantModelsOption).toBeVisible()
+  await modelPicker.press('ArrowDown')
+  await expect(grantModelsOption).toHaveAttribute('data-highlighted', '')
+  const providerListResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url())
+    return response.request().method() === 'GET' && url.pathname.endsWith('/model-provider-configs')
+  })
+  await modelPicker.press('Enter')
   const dialog = page.getByRole('dialog', { name: 'Grant models' })
   const providerPicker = dialog.getByRole('combobox', { name: 'Search model providers…' })
+  expect((await providerListResponse).ok()).toBe(true)
   await providerPicker.fill(providerConfig)
   await page.getByRole('option', { name: providerConfig }).click()
   const configuredModelPicker = dialog.getByRole('combobox', {
@@ -237,6 +341,7 @@ test('granting a model from the Builder does not create a profile or agent', asy
 
   await expect(dialog).toHaveCount(0)
   await expect(page).toHaveURL(createAgentPath)
+  await page.keyboard.press('Escape')
   await expect(page.getByRole('button', { name: 'Create & launch agent' })).toBeEnabled()
   expect(agentSubmissionRequests).toBe(0)
   expect(failures).toEqual([])
@@ -246,8 +351,13 @@ test('keeps profile config edits across tabs and confirms launching with unsaved
   page,
 }) => {
   const failures = installFailureTracking(page, [/^page: Canceled$/])
-  await createProfile(page, 'Draft Keeper Profile', 'Keep unsaved edits across tab switches.')
+  await createProfile(
+    page,
+    uniqueName('Draft Keeper Profile'),
+    'Keep unsaved edits across tab switches.',
+  )
 
+  await page.getByRole('button', { name: 'YAML' }).click()
   await typeInConfigEditor(page, '# draft edit\n')
   await expect(page.getByRole('button', { name: 'Save revision' })).toBeEnabled()
 
@@ -276,7 +386,11 @@ test('keeps profile config edits across tabs and confirms launching with unsaved
 
 test('keeps the save pending across tab switches while the revision uploads', async ({ page }) => {
   const failures = installFailureTracking(page, [/^page: Canceled$/])
-  await createProfile(page, 'Pending Save Profile', 'Hold the save request while tabs switch.')
+  await createProfile(
+    page,
+    uniqueName('Pending Save Profile'),
+    'Hold the save request while tabs switch.',
+  )
 
   let releaseSave!: () => void
   const holdSave = new Promise<void>((resolve) => {
@@ -287,6 +401,7 @@ test('keeps the save pending across tab switches while the revision uploads', as
     await route.continue()
   })
 
+  await page.getByRole('button', { name: 'YAML' }).click()
   await typeInConfigEditor(page, '# pending save\n')
 
   const saveButton = page.getByRole('button', { name: 'Save revision' })
@@ -313,25 +428,67 @@ test('keeps the save pending across tab switches while the revision uploads', as
   expect(failures).toEqual([])
 })
 
+test('renames a profile from its detail page', async ({ page }) => {
+  const failures = installFailureTracking(page)
+  const renamedName = uniqueName('Renamed Profile E2E')
+  await createProfile(
+    page,
+    uniqueName('Rename Profile E2E'),
+    'Rename this profile from its detail page.',
+  )
+
+  await page.getByRole('button', { name: 'Rename profile' }).click()
+  await page.getByRole('textbox', { name: 'Profile name' }).fill(renamedName)
+  await page.getByRole('button', { name: 'Save name' }).click()
+
+  await expect(page.getByRole('heading', { name: renamedName })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Rename profile' })).toBeVisible()
+  expect(failures).toEqual([])
+})
+
 test('deletes a profile from its detail page', async ({ page }) => {
   const failures = installFailureTracking(page, [
     /agent-profiles\/aprf_[a-z2-7]+ \(net::ERR_ABORTED\)$/,
     /^response: 404 .*\/agent-profiles\/aprf_[a-z2-7]+$/,
   ])
-  await createProfile(page, 'Deleted Profile E2E', 'Delete this profile from its detail page.')
+  const profileName = uniqueName('Deleted Profile E2E')
+  await createProfile(page, profileName, 'Delete this profile from its detail page.')
 
   page.once('dialog', (dialog) => void dialog.accept())
-  await page.getByRole('button', { name: 'Row actions' }).click()
-  await page.getByRole('menuitem', { name: 'Delete' }).click()
+  await page.getByRole('button', { name: 'Delete profile' }).click()
 
   await expect(page).toHaveURL(`/projects/${projectID}/agents`)
   await expect(page.getByRole('heading', { name: 'Agent profiles' })).toBeVisible()
-  await expect(page.getByText('Deleted Profile E2E')).toHaveCount(0)
+  await expect(page.getByText(profileName)).toHaveCount(0)
 
   await page.goBack()
   await expect(page.getByRole('heading', { name: 'Something went wrong' })).toBeVisible()
   await expect(page.getByText(/^404: /)).toBeVisible()
-  await expect(page.getByText('Deleted Profile E2E')).toHaveCount(0)
+  await expect(page.getByText(profileName)).toHaveCount(0)
+  expect(failures).toEqual([])
+})
+
+test('edits a profile with the Builder', async ({ page }) => {
+  const failures = installFailureTracking(page)
+  await createProfile(page, uniqueName('Builder Edit Agent'), 'Original instruction.')
+
+  await expect(page.getByRole('combobox', { name: 'Model' })).toBeVisible()
+  const instruction = page.getByLabel('Instruction')
+  await expect(instruction).toHaveValue('Original instruction.')
+  const save = page.getByRole('button', { name: 'Save revision' })
+  await expect(save).toBeDisabled()
+
+  await instruction.fill('Updated instruction.')
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect(save).toBeDisabled()
+
+  await page.getByRole('button', { name: 'YAML' }).click()
+  await expect(page.locator('.monaco-editor')).toContainText('Updated instruction.')
+
+  await page.getByRole('button', { name: 'Integrations' }).click()
+  await expect(page.getByText('No integrations yet.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Add integration' })).toBeVisible()
   expect(failures).toEqual([])
 })
 

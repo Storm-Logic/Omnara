@@ -1,19 +1,14 @@
-import { type MachinePool, type VisibleMachine } from '@omnara/sdk'
-import { Trash2Icon } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
-import {
-  type BasicMachineSource,
-  type MachineSourceKind,
-  newMachineSource,
-} from '@/components/agents/agentConfigBasicSerialization'
 import {
   MachineSourceCombobox,
   PoolSourceCombobox,
 } from '@/components/agents/AgentConfigMachineSourceComboboxes'
 import { SourceOverridesSection } from '@/components/agents/AgentConfigMachineSourceOverrides'
+import { AgentConfigSectionCard } from '@/components/agents/AgentConfigSectionCard'
+import { type BasicMachineSource, newMachineSource } from '@/components/agents/useAgentBuilderForm'
+import { PlusIcon, Trash2Icon } from '@/components/icons'
 import { emptyProviderOptions } from '@/components/machines/machineOverrides'
-import { GrantMachineButton } from '@/components/projects/GrantMachineButton'
-import { GrantMachinePoolButton } from '@/components/projects/GrantMachinePoolButton'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -21,7 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { Field, FieldLabel, RequiredFieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 
 export function AgentConfigMachineSourcesField({
@@ -29,132 +24,180 @@ export function AgentConfigMachineSourcesField({
   projectId,
   sources,
   onSourcesChange,
+  onUnavailableIdsChange,
+  showMissingToolsWarning,
+  onAddMissingTools,
 }: {
   orgId: string
   projectId: string
   sources: BasicMachineSource[]
   onSourcesChange: (sources: BasicMachineSource[]) => void
+  onUnavailableIdsChange: (ids: string[]) => void
+  showMissingToolsWarning: boolean
+  onAddMissingTools: () => void
 }) {
   function updateSource(id: string, patch: Partial<BasicMachineSource>) {
     onSourcesChange(sources.map((source) => (source.id === id ? { ...source, ...patch } : source)))
   }
 
-  function hasSource(kind: MachineSourceKind, name: string) {
-    return sources.some((source) => source.kind === kind && source.name === name)
+  const [unavailableIds, setUnavailableIds] = useState<ReadonlySet<string>>(new Set())
+  const reportAvailability = (id: string, unavailable: boolean) => {
+    setUnavailableIds((prev) => {
+      if (prev.has(id) === unavailable) return prev
+      const next = new Set(prev)
+      if (unavailable) {
+        next.add(id)
+      } else {
+        next.delete(id)
+      }
+      return next
+    })
   }
-
-  function addGrantedPool(pool: MachinePool) {
-    if (hasSource('pool', pool.name)) return
-    onSourcesChange([
-      ...sources,
-      {
-        ...newMachineSource('pool'),
-        name: pool.name,
-        provider: pool.provider,
-        managementKind: pool.management_kind,
-      },
-    ])
-  }
-
-  function addGrantedMachines(machines: VisibleMachine[]) {
-    const existingNames = new Set(
-      sources.flatMap((source) => (source.kind === 'machine' ? [source.name] : [])),
+  useEffect(() => {
+    onUnavailableIdsChange(
+      sources.flatMap((source) => (unavailableIds.has(source.id) ? [source.id] : [])),
     )
-    const added: BasicMachineSource[] = []
-    for (const machine of machines) {
-      if (existingNames.has(machine.display_name)) continue
-      existingNames.add(machine.display_name)
-      added.push({ ...newMachineSource('machine'), name: machine.display_name })
-    }
-    if (added.length > 0) onSourcesChange([...sources, ...added])
-  }
+  }, [onUnavailableIdsChange, sources, unavailableIds])
 
   return (
-    <Field>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <FieldLabel>Machine sources</FieldLabel>
-          <FieldDescription>Machines the agent can run commands on.</FieldDescription>
-        </div>
-        <div className="flex items-center gap-2">
-          <GrantMachinePoolButton onGranted={addGrantedPool} />
-          <GrantMachineButton onGranted={addGrantedMachines} />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" size="sm" variant="outline">
-                Add source
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onSelect={() => {
-                  onSourcesChange([...sources, newMachineSource('pool')])
-                }}
-              >
-                Machine pool
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() => {
-                  onSourcesChange([...sources, newMachineSource('machine')])
-                }}
-              >
-                Existing machine
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
-      <div className="space-y-3">
-        {sources.length === 0 ? (
-          <div className="border-border bg-background/60 text-muted-foreground flex min-h-16 items-center justify-center rounded-md border border-dashed px-4 text-sm">
-            No machine sources
-          </div>
-        ) : (
-          sources.map((source) => (
-            <div
-              key={source.id}
-              className="border-border bg-background space-y-4 rounded-lg border p-4"
+    <AgentConfigSectionCard
+      title="Machine sources"
+      action={
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="text-muted-foreground size-8"
+              aria-label="Add source"
             >
+              <PlusIcon />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => {
+                onSourcesChange([...sources, newMachineSource('pool')])
+              }}
+            >
+              Machine pool
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => {
+                onSourcesChange([...sources, newMachineSource('machine')])
+              }}
+            >
+              BYO machine
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
+    >
+      {showMissingToolsWarning || sources.length > 0 ? (
+        <div className="divide-y">
+          {showMissingToolsWarning && (
+            <div role="alert" className="flex items-center justify-between gap-3 px-5 py-3">
+              <p className="text-sm">Some machine tools are missing.</p>
+              <Button type="button" size="sm" variant="outline" onClick={onAddMissingTools}>
+                Add missing tools
+              </Button>
+            </div>
+          )}
+          {sources.map((source) => (
+            <div key={source.id} className="space-y-4 px-5 py-4">
               <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
                 <Field>
-                  <FieldLabel>{source.kind === 'pool' ? 'Machine pool' : 'Machine'}</FieldLabel>
+                  <RequiredFieldLabel htmlFor={`${source.id}-source`}>
+                    {source.kind === 'pool' ? 'Machine pool' : 'BYO machine'}
+                  </RequiredFieldLabel>
                   {source.kind === 'pool' ? (
                     <PoolSourceCombobox
+                      id={`${source.id}-source`}
+                      required
                       orgId={orgId}
                       projectId={projectId}
-                      value={
-                        source.name === ''
-                          ? null
-                          : {
-                              name: source.name,
-                              provider: source.provider,
-                              managementKind: source.managementKind,
-                            }
-                      }
-                      onChange={(selection) => {
-                        const name = selection?.name ?? ''
+                      value={source.name}
+                      onChange={(name, pool) => {
                         if (name === source.name) return
                         updateSource(source.id, {
                           name,
-                          provider: selection?.provider ?? '',
-                          managementKind: selection?.managementKind ?? '',
+                          provider: pool?.provider ?? '',
+                          managementKind: pool?.management_kind ?? '',
                           machineCpu: '',
                           machineMemoryGb: '',
+                          deleteAfterIdleMinutes: '',
                           providerOptions: emptyProviderOptions,
                           envRows: [],
                           secretEnvRows: [],
                         })
                       }}
+                      onUnavailableChange={(unavailable) => {
+                        reportAvailability(source.id, unavailable)
+                      }}
+                      onPoolResolved={(pool) => {
+                        if (
+                          source.provider === pool.provider &&
+                          source.managementKind === pool.management_kind
+                        ) {
+                          return
+                        }
+                        updateSource(source.id, {
+                          provider: pool.provider,
+                          managementKind: pool.management_kind,
+                        })
+                      }}
                     />
                   ) : (
                     <MachineSourceCombobox
+                      id={`${source.id}-source`}
+                      required
                       orgId={orgId}
                       projectId={projectId}
-                      value={source.name === '' ? null : { name: source.name }}
-                      onChange={(selection) => {
-                        updateSource(source.id, { name: selection?.name ?? '' })
+                      value={source.name}
+                      onChange={(name) => {
+                        updateSource(source.id, { name })
+                      }}
+                      onUnavailableChange={(unavailable) => {
+                        reportAvailability(source.id, unavailable)
+                      }}
+                      onMachinesGranted={(names) => {
+                        const used = new Set(
+                          sources.flatMap((candidate) =>
+                            candidate.kind === 'machine' ? [candidate.name] : [],
+                          ),
+                        )
+                        const [first, ...rest] = [...new Set(names)].filter(
+                          (name) => !used.has(name),
+                        )
+                        if (first === undefined) return
+                        if (source.name === '') {
+                          onSourcesChange([
+                            ...sources.map((candidate) =>
+                              candidate.id === source.id
+                                ? { ...candidate, name: first }
+                                : candidate,
+                            ),
+                            ...rest.map((name) => ({ ...newMachineSource('machine'), name })),
+                          ])
+                          return
+                        }
+                        onSourcesChange([
+                          ...sources,
+                          ...[first, ...rest].map((name) => ({
+                            ...newMachineSource('machine'),
+                            name,
+                          })),
+                        ])
                       }}
                     />
+                  )}
+                  {unavailableIds.has(source.id) && (
+                    <p className="text-destructive text-sm">
+                      {source.kind === 'pool'
+                        ? 'This machine pool is no longer available to the project. Pick another pool or remove the source.'
+                        : 'This machine is no longer available to the project. Pick another machine or remove the source.'}
+                    </p>
                   )}
                 </Field>
                 <div className="hidden items-end sm:flex">
@@ -179,7 +222,7 @@ export function AgentConfigMachineSourcesField({
                       <Input
                         id={`${source.id}-initial`}
                         type="number"
-                        min={1}
+                        min={0}
                         value={source.initialNumMachines}
                         placeholder="1"
                         onChange={(event) => {
@@ -192,7 +235,7 @@ export function AgentConfigMachineSourcesField({
                       <Input
                         id={`${source.id}-max`}
                         type="number"
-                        min={1}
+                        min={0}
                         value={source.maxMachines}
                         placeholder="1"
                         onChange={(event) => {
@@ -235,9 +278,9 @@ export function AgentConfigMachineSourcesField({
                 Remove source
               </Button>
             </div>
-          ))
-        )}
-      </div>
-    </Field>
+          ))}
+        </div>
+      ) : null}
+    </AgentConfigSectionCard>
   )
 }

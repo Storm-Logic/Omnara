@@ -12,6 +12,7 @@ export {
   useAgentChat,
   type UseAgentChatResult,
 } from './domains/agent-chat'
+export { useAgentInputBacklog } from './domains/agent-input-backlog'
 export {
   useAgentInteractions,
   useCancelAgent,
@@ -22,10 +23,12 @@ export {
   type AgentProfileListOptions,
   type AgentProfileListSort,
   useAgentProfile,
+  useAgentProfileQuery,
   useAgentProfiles,
   useCreateAgentProfile,
   useCreateSlackSetup,
   useDeleteAgentProfile,
+  useRenameAgentProfile,
   useUpdateAgentProfile,
 } from './domains/agent-profiles'
 export {
@@ -33,11 +36,22 @@ export {
   type AgentListOptions,
   type AgentListSort,
   useAgent,
+  useAgentConfig,
   useAgents,
   useArchiveAgent,
   useCreateAgent,
   useCreateAgentConfig,
+  useUpdateAgentConfig,
 } from './domains/agents'
+export {
+  type CronTriggerListFilters,
+  type CronTriggerListOptions,
+  type CronTriggerListSort,
+  useCreateCronTrigger,
+  useCronTriggers,
+  useDeleteCronTrigger,
+  useUpdateCronTrigger,
+} from './domains/cron-triggers'
 export {
   type IntegrationInstallListFilters,
   type IntegrationInstallListOptions,
@@ -49,6 +63,7 @@ export {
   useAcceptInvitation,
   useDeclineInvitation,
   usePendingInvitations,
+  usePendingInvitationsQuery,
 } from './domains/invitations'
 export {
   CREATED_RESOURCE_LIST_SORTS,
@@ -79,6 +94,7 @@ export {
   useConnectMachine,
   useDeleteMachine,
   useGrantMachineToProject,
+  useMachine,
   useMachines,
   useProjectMachines,
 } from './domains/machines'

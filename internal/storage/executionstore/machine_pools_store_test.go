@@ -3,11 +3,96 @@ package executionstore
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
+	"github.com/omnara-ai/omnara/internal/resourcemeta"
 	"github.com/omnara-ai/omnara/internal/storage/management"
+	"github.com/omnara-ai/omnara/internal/storage/patch"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 )
+
+func TestValidateClusterMachinePoolUpdate(t *testing.T) {
+	value := 2
+	text := "changed"
+	flag := true
+	maxMachines := int32(2)
+	secretID := ID{1}
+	tests := []struct {
+		field     string
+		input     UpdateMachinePoolInput
+		protected bool
+	}{
+		{field: "OrgID", input: UpdateMachinePoolInput{OrgID: ID{1}}},
+		{field: "ID", input: UpdateMachinePoolInput{ID: ID{1}}},
+		{field: "Name", input: UpdateMachinePoolInput{Name: &text}, protected: true},
+		{field: "Description", input: UpdateMachinePoolInput{Description: &text}, protected: true},
+		{
+			field: "DefaultMachineCPU",
+			input: UpdateMachinePoolInput{DefaultMachineCPU: patch.NullableInt{Set: true, Value: &value}},
+		},
+		{
+			field: "DefaultMachineMemoryMB",
+			input: UpdateMachinePoolInput{DefaultMachineMemoryMB: patch.NullableInt{Set: true, Value: &value}},
+		},
+		{field: "DefaultMachineEnv", input: UpdateMachinePoolInput{DefaultMachineEnv: json.RawMessage(`{"PLAIN":"value"}`)}},
+		{field: "DefaultMachineSecretEnv", input: UpdateMachinePoolInput{DefaultMachineSecretEnv: json.RawMessage(`{"TOKEN":"sec_example"}`)}},
+		{
+			field:     "DefaultMachineProviderOptions",
+			input:     UpdateMachinePoolInput{DefaultMachineProviderOptions: json.RawMessage(`{"startup_script":"echo new"}`)},
+			protected: true,
+		},
+		{field: "DefaultCwd", input: UpdateMachinePoolInput{DefaultCwd: &text}, protected: true},
+		{field: "ProviderConfig", input: UpdateMachinePoolInput{ProviderConfig: json.RawMessage(`{}`)}, protected: true},
+		{field: "ProviderAuthSecretID", input: UpdateMachinePoolInput{ProviderAuthSecretID: &secretID}, protected: true},
+		{field: "RuntimeProtectionEnabled", input: UpdateMachinePoolInput{RuntimeProtectionEnabled: &flag}, protected: true},
+		{field: "MaxTotalMachines", input: UpdateMachinePoolInput{MaxTotalMachines: &maxMachines}, protected: true},
+		{field: "MaxTotalCPU", input: UpdateMachinePoolInput{MaxTotalCPU: patch.NullableInt{Set: true}}, protected: true},
+		{
+			field:     "MaxTotalMemoryMB",
+			input:     UpdateMachinePoolInput{MaxTotalMemoryMB: patch.NullableInt{Set: true}},
+			protected: true,
+		},
+		{field: "MinMachineCPU", input: UpdateMachinePoolInput{MinMachineCPU: patch.NullableInt{Set: true, Value: &value}}},
+		{
+			field: "MinMachineMemoryMB",
+			input: UpdateMachinePoolInput{MinMachineMemoryMB: patch.NullableInt{Set: true, Value: &value}},
+		},
+		{field: "MaxMachineCPU", input: UpdateMachinePoolInput{MaxMachineCPU: patch.NullableInt{Set: true, Value: &value}}},
+		{
+			field: "MaxMachineMemoryMB",
+			input: UpdateMachinePoolInput{MaxMachineMemoryMB: patch.NullableInt{Set: true, Value: &value}},
+		},
+		{
+			field: "DeleteAfterIdleMinutes",
+			input: UpdateMachinePoolInput{DeleteAfterIdleMinutes: patch.NullableInt{Set: true, Value: &value}},
+		},
+		{field: "Metadata", input: UpdateMachinePoolInput{Metadata: resourcemeta.Metadata{}}, protected: true},
+	}
+	classified := make(map[string]struct{}, len(tests))
+	for _, test := range tests {
+		if _, duplicate := classified[test.field]; duplicate {
+			t.Fatalf("UpdateMachinePoolInput field %s is classified more than once", test.field)
+		}
+		classified[test.field] = struct{}{}
+		t.Run(test.field, func(t *testing.T) {
+			err := validateClusterMachinePoolUpdate(test.input)
+			if !test.protected && err != nil {
+				t.Fatalf("editable cluster field error = %v", err)
+			}
+			if test.protected && !errors.Is(err, storeerr.ErrStateTransitionConflict) {
+				t.Fatalf("protected cluster field error = %v, want state transition conflict", err)
+			}
+		})
+	}
+	inputType := reflect.TypeOf(UpdateMachinePoolInput{})
+	for fieldIndex := range inputType.NumField() {
+		fieldName := inputType.Field(fieldIndex).Name
+		if _, ok := classified[fieldName]; !ok {
+			t.Errorf("UpdateMachinePoolInput field %s has no cluster update behavior test", fieldName)
+		}
+	}
+}
 
 func TestPrepareMachinePoolConfigInputAllowsIndependentResourceDefaultsAndCaps(t *testing.T) {
 	value := 1
@@ -35,6 +120,30 @@ func TestPrepareMachinePoolConfigInputAllowsIndependentResourceDefaultsAndCaps(t
 				t.Fatalf("prepare independent machine pool resources: %v", err)
 			}
 		})
+	}
+}
+
+func TestPrepareMachinePoolConfigInputValidatesIdleDeletionMinutes(t *testing.T) {
+	for _, test := range []struct {
+		minutes *int
+		valid   bool
+	}{
+		{valid: true},
+		{minutes: intPtrForMachinePoolStoreTest(0), valid: false},
+		{minutes: intPtrForMachinePoolStoreTest(4), valid: false},
+		{minutes: intPtrForMachinePoolStoreTest(5), valid: true},
+	} {
+		input := CreateMachinePoolInput{
+			ManagementKind:                management.Cluster,
+			ProviderAuthEnvVar:            "TEST_PROVIDER_TOKEN",
+			DefaultMachineProviderOptions: json.RawMessage(`{}`),
+			MaxTotalMachines:              1,
+			DeleteAfterIdleMinutes:        test.minutes,
+		}
+		_, err := prepareMachinePoolConfigInput(&input)
+		if (err == nil) != test.valid {
+			t.Fatalf("delete_after_idle_minutes %v error = %v, valid = %v", test.minutes, err, test.valid)
+		}
 	}
 }
 

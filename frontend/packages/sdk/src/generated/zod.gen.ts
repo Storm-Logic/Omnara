@@ -52,6 +52,11 @@ export const zError = z.object({
     ])
 });
 
+export const zWarning = z.object({
+    message: z.string(),
+    code: z.enum(['missing_recommended_machine_tools'])
+});
+
 /**
  * Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
  */
@@ -86,7 +91,7 @@ export const zServerErrorCode = z.enum([
 ]);
 
 /**
- * Lifecycle owner. Tenant-managed resources can be changed through tenant APIs; cluster-managed resources are installed by the control plane and are read-only through tenant lifecycle APIs.
+ * Lifecycle owner. Tenant-managed resources can be changed through tenant APIs. Cluster-managed resources are installed and lifecycle-managed by the control plane; individual APIs may explicitly expose tenant-editable settings.
  */
 export const zManagementKind = z.enum(['tenant', 'cluster']);
 
@@ -100,6 +105,10 @@ export const zOrgApiKeyId = z.string().regex(/^oak_[a-z2-7]{26}$/);
 
 export const zProjectId = z.string().regex(/^proj_[a-z2-7]{26}$/);
 
+export const zMcpoAuthFlowId = z.string().regex(/^moaf_[a-z2-7]{26}$/);
+
+export const zIntegrationOAuthFlowId = z.string().regex(/^ioaf_[a-z2-7]{26}$/);
+
 export const zActorId = z.string().regex(/^actr_[a-z2-7]{26}$/);
 
 export const zAgentId = z.string().regex(/^agt_[a-z2-7]{26}$/);
@@ -107,6 +116,8 @@ export const zAgentId = z.string().regex(/^agt_[a-z2-7]{26}$/);
 export const zAgentConfigId = z.string().regex(/^acfg_[a-z2-7]{26}$/);
 
 export const zAgentProfileId = z.string().regex(/^aprf_[a-z2-7]{26}$/);
+
+export const zCronTriggerId = z.string().regex(/^cron_[a-z2-7]{26}$/);
 
 export const zIntegrationInstallId = z.string().regex(/^iin_[a-z2-7]{26}$/);
 
@@ -153,7 +164,7 @@ export const zModelProviderApiVariant = z.enum([
 export const zModelProviderApiVariantResponse = z.string();
 
 /**
- * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, and selected reasoning policy. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
+ * Extra top-level JSON fields to include in provider requests for this configured model. Use this for provider-specific settings that Omnara does not expose as typed fields, such as OpenRouter `provider` routing or sampling parameters. Omnara still controls the fields it needs to run the agent correctly, including the model, prompt/messages, streaming, tools, output-token limit, and selected reasoning policy. Provider passthrough values for those fields are ignored. For OpenRouter routing options, see https://openrouter.ai/docs/guides/routing/provider-selection and general request parameters at https://openrouter.ai/docs/api/reference/parameters.
  */
 export const zModelApiVariantOptions = z.record(z.string(), z.unknown());
 
@@ -351,6 +362,7 @@ export const zConfiguredModel = z.object({
     id: zConfiguredModelId,
     org_id: zOrganizationId,
     model_provider_config_id: zModelProviderConfigId,
+    management_kind: zManagementKind,
     name: z.string(),
     current_revision_id: zConfiguredModelRevisionId,
     provider_model_slug: z.string(),
@@ -523,6 +535,7 @@ export const zSkillGrant = z.object({
 export const zMcpoAuthStartMetadata = z.record(z.string(), z.string().max(512));
 
 export const zMcpoAuthStartResponse = z.object({
+    flow_id: zMcpoAuthFlowId,
     authorization_url: z.url(),
     expires_at: zTimestamp
 });
@@ -562,6 +575,7 @@ export const zListIntegrationInstallsResponse = z.object({
 
 export const zIntegrationOAuthSetup = z.object({
     provider: z.string(),
+    flow_id: zIntegrationOAuthFlowId,
     oauth_url: z.url(),
     redirect_uri: z.url(),
     events_url: z.url(),
@@ -583,6 +597,7 @@ export const zCreateSlackSetupRequest = z.object({
 
 export const zSlackSetup = z.object({
     provider: z.string(),
+    flow_id: zIntegrationOAuthFlowId,
     slack_app_id: z.string(),
     oauth_url: z.url(),
     redirect_uri: z.url(),
@@ -594,6 +609,15 @@ export const zSlackSetup = z.object({
 export const zCreateAgentConfigRequest = z.object({
     source: z.string().min(1),
     source_format: z.enum(['yaml', 'json'])
+});
+
+/**
+ * Replaces a live agent's config. expected_current_config_id makes the change conditional on the agent still running that config, so concurrent editors get a conflict instead of silently overwriting each other.
+ */
+export const zUpdateAgentConfigRequest = z.object({
+    source: z.string().min(1),
+    source_format: z.enum(['yaml', 'json']),
+    expected_current_config_id: zAgentConfigId.optional()
 });
 
 export const zToolPermissionSelection = z.object({
@@ -656,6 +680,7 @@ export const zAgentConfig = z.object({
     effective_definition_hash: z.string(),
     model: zAgentConfigModel,
     instruction_hash: z.string().optional(),
+    warnings: z.array(zWarning).min(1).optional(),
     created_at: zTimestamp
 });
 
@@ -667,6 +692,10 @@ export const zCreateAgentProfileRequest = z.object({
 export const zUpdateAgentProfileRequest = z.object({
     config: zAgentConfigId,
     expected_current_config_id: zAgentConfigId
+});
+
+export const zRenameAgentProfileRequest = z.object({
+    name: z.string()
 });
 
 export const zAgentProfile = z.object({
@@ -683,6 +712,81 @@ export const zAgentProfile = z.object({
 
 export const zListAgentProfilesResponse = z.object({
     data: z.array(zAgentProfile),
+    next_cursor: z.string().nullable()
+});
+
+export const zAgentCronTriggerTarget = z.object({
+    type: z.enum(['agent']),
+    agent_id: zAgentId
+});
+
+export const zAgentProfileCronTriggerTarget = z.object({
+    type: z.enum(['profile']),
+    agent_profile_id: zAgentProfileId
+});
+
+export const zCronTriggerTarget = z.discriminatedUnion('type', [
+    zAgentCronTriggerTarget.extend({ type: z.literal('agent') }),
+    zAgentProfileCronTriggerTarget.extend({ type: z.literal('profile') })
+]);
+
+/**
+ * Standard five-field cron expression (minute, hour, day of month, month, day of week). `TZ=`/`CRON_TZ=` prefixes are rejected; set the `timezone` field instead.
+ */
+export const zCronExpression = z.string().min(9).max(256);
+
+/**
+ * IANA time zone the schedule is evaluated in.
+ */
+export const zCronTimezone = z.string().max(64).default('UTC');
+
+/**
+ * Go text/template rendered on each firing to produce the message sent to the target. The template receives a `trigger` value with `name`, `fired_at`, and `last_fired_at` fields. Rendering is capped at 64 KiB of output and one second of wall-clock time, and `printf` width and precision specifiers are capped at 1024; a firing whose template fails to render is recorded in `failure_report` without sending a message.
+ */
+export const zCronMessageTemplate = z.string().max(65536);
+
+export const zCronTriggerFailureReport = z.object({
+    message: z.string(),
+    will_retry: z.boolean(),
+    failed_at: zTimestamp
+});
+
+export const zCreateCronTriggerRequest = z.object({
+    name: z.string(),
+    target: zCronTriggerTarget,
+    cron: zCronExpression,
+    timezone: zCronTimezone.optional(),
+    message_template: zCronMessageTemplate,
+    enabled: z.boolean().optional().default(true)
+});
+
+export const zUpdateCronTriggerRequest = z.object({
+    name: z.string().optional(),
+    cron: zCronExpression.optional(),
+    timezone: zCronTimezone.optional(),
+    message_template: zCronMessageTemplate.optional(),
+    enabled: z.boolean().optional()
+});
+
+export const zCronTrigger = z.object({
+    id: zCronTriggerId,
+    org_id: zOrganizationId,
+    project_id: zProjectId,
+    name: z.string(),
+    target: zCronTriggerTarget,
+    cron: zCronExpression,
+    timezone: zCronTimezone,
+    message_template: zCronMessageTemplate,
+    enabled: z.boolean(),
+    last_fired_at: zTimestamp.nullable(),
+    next_fire_at: zTimestamp.nullable(),
+    failure_report: zCronTriggerFailureReport.nullable(),
+    created_at: zTimestamp,
+    updated_at: zTimestamp
+});
+
+export const zListCronTriggersResponse = z.object({
+    data: z.array(zCronTrigger),
     next_cursor: z.string().nullable()
 });
 
@@ -721,8 +825,29 @@ export const zAgent = z.object({
     archived_at: zTimestamp.optional()
 });
 
-export const zGetAgentResponse = z.object({
+export const zAgentMcpConnection = z.object({
+    server_key: z.string(),
+    endpoint_url: z.string(),
+    state: z.enum([
+        'initializing',
+        'ready',
+        'failed',
+        'expired'
+    ]),
+    protocol_version: z.string().optional(),
+    initialize_error: z.string(),
+    created_at: zTimestamp,
+    updated_at: zTimestamp
+});
+
+export const zCurrentAgentResponse = z.object({
     agent: zAgent
+});
+
+export const zGetAgentResponse = z.object({
+    agent: zAgent,
+    machine_ids: z.array(zMachineId),
+    mcp_connections: z.array(zAgentMcpConnection)
 });
 
 export const zListAgentsResponse = z.object({
@@ -803,6 +928,25 @@ export const zAgentMachineBinding = z.object({
     secret_env_overlay: z.record(z.string(), zSecretId.nullable()),
     created_at: zTimestamp,
     updated_at: zTimestamp
+});
+
+/**
+ * The machine's most recent daemon-reported failure. A single slot, overwritten by newer reports and cleared when the daemon recovers.
+ */
+export const zMachineFailureReport = z.object({
+    stage: z.enum([
+        'startup_script',
+        'daemon_install',
+        'daemon_update',
+        'daemon_uninstall',
+        'daemon_uninstalled'
+    ]),
+    exit_status: z.int().optional(),
+    output_tail: z.string(),
+    output_truncated: z.boolean(),
+    daemon_version: z.string().optional(),
+    target_version: z.string().optional(),
+    reported_at: zTimestamp
 });
 
 /**
@@ -1569,6 +1713,7 @@ export const zOrganizationMembership = z.object({
 export const zOrgInvitation = z.object({
     id: zOrgInvitationId,
     org_id: zOrganizationId,
+    org_name: z.string(),
     email: z.email(),
     org_role: z.string(),
     created_at: zTimestamp
@@ -1673,6 +1818,7 @@ export const zCreateMachinePoolRequestBase = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).optional(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).optional(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).optional(),
+    delete_after_idle_minutes: z.int().gte(5).lte(2147483647).optional(),
     metadata: zMachineMetadata.optional()
 });
 
@@ -1720,7 +1866,14 @@ export const zUpdateMachinePoolRequest = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullish(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullish(),
+    delete_after_idle_minutes: z.int().gte(5).lte(2147483647).nullish(),
     metadata: zMachineMetadata.optional()
+});
+
+export const zMachinePoolUsage = z.object({
+    machines: z.int().gte(0).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    cpu: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    memory_mb: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
 export const zMachinePool = z.object({
@@ -1746,9 +1899,11 @@ export const zMachinePool = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullable(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullable(),
+    delete_after_idle_minutes: z.int().gte(5).lte(2147483647).nullable(),
     metadata: zMetadata,
     created_at: zTimestamp,
-    updated_at: zTimestamp
+    updated_at: zTimestamp,
+    usage: zMachinePoolUsage.optional()
 });
 
 export const zListMachinePoolsResponse = z.object({
@@ -1794,6 +1949,7 @@ export const zMachine = z.object({
     secret_env: z.record(z.string(), zSecretId),
     lifecycle_reason_code: z.string(),
     lifecycle_reason_message: z.string(),
+    failure_report: zMachineFailureReport.optional(),
     next_reconcile_after: zTimestamp.nullable(),
     provision_attempts: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
     delete_attempts: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
@@ -1917,6 +2073,10 @@ export const zProjectMachinePoolGrant = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullable(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullable(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullable(),
+    delete_after_idle_minutes: z.union([
+        z.literal(0),
+        z.int().gte(5).lte(2147483647)
+    ]).nullable(),
     metadata: zMetadata,
     created_at: zTimestamp,
     updated_at: zTimestamp
@@ -1938,6 +2098,10 @@ export const zCreateProjectMachinePoolGrantRequest = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).optional(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).optional(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).optional(),
+    delete_after_idle_minutes: z.union([
+        z.literal(0),
+        z.int().gte(5).lte(2147483647)
+    ]).optional(),
     metadata: zMetadata.optional()
 });
 
@@ -1959,6 +2123,10 @@ export const zUpdateProjectMachinePoolGrantRequest = z.object({
     min_machine_memory_mb: z.int().gte(0).lte(2147483647).nullish(),
     max_machine_cpu: z.int().gte(1).lte(2147483647).nullish(),
     max_machine_memory_mb: z.int().gte(1).lte(2147483647).nullish(),
+    delete_after_idle_minutes: z.union([
+        z.literal(0),
+        z.int().gte(5).lte(2147483647)
+    ]).nullish(),
     metadata: zMetadata.optional()
 });
 
@@ -2304,24 +2472,45 @@ export const zSecretOwnerKindFilter = z.enum([
 export const zSecretOwnerProjectIdFilter = zProjectId;
 
 /**
+ * Filter to secrets that have a version created by this MCP OAuth flow.
+ */
+export const zSecretMcpoAuthFlowIdFilter = zMcpoAuthFlowId;
+
+/**
  * Only return integration installs bound to this agent profile.
  */
 export const zIntegrationInstallAgentProfileFilter = zAgentProfileId;
+
+/**
+ * Only return the integration install completed by this OAuth setup flow.
+ */
+export const zIntegrationInstallOAuthFlowIdFilter = zIntegrationOAuthFlowId;
 
 /**
  * Filter a project inventory by how the secret became available.
  */
 export const zSecretAvailabilitySourceFilter = z.enum(['direct', 'grant']);
 
+export const zListPersonalAccessTokensQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * The authenticated user's personal access tokens.
  */
 export const zListPersonalAccessTokensResponse2 = zListPersonalAccessTokensResponse;
 
+export const zCreatePersonalAccessTokenBody = zCreatePersonalAccessTokenRequest;
+
 /**
  * Personal access token created.
  */
 export const zCreatePersonalAccessTokenResponse2 = zCreatePersonalAccessTokenResponse;
+
+export const zRevokePersonalAccessTokenPath = z.object({
+    tokenID: z.string().regex(/^pat_[a-z2-7]{26}$/)
+});
 
 /**
  * The revoked personal access token.
@@ -2333,15 +2522,41 @@ export const zRevokePersonalAccessTokenResponse = zPersonalAccessToken;
  */
 export const zBootstrapDaemonResponse2 = zBootstrapDaemonResponse;
 
+export const zRecordMachineFailureBody = z.string().max(4097);
+
+export const zRecordMachineFailureQuery = z.object({
+    stage: z.enum([
+        'startup_script',
+        'daemon_install',
+        'daemon_update',
+        'daemon_uninstall',
+        'daemon_uninstalled'
+    ]),
+    exit_status: z.int().gte(1).lte(255).optional(),
+    capture_status: z.int().gte(0).lte(255).optional(),
+    daemon_version: z.string().max(100).optional(),
+    target_version: z.string().max(100).optional()
+});
+
 /**
  * Machine failure recorded.
  */
 export const zRecordMachineFailureResponse = z.void();
 
+export const zCreateOrganizationBody = zCreateOrganizationRequest;
+
+export const zCreateOrganizationHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
 /**
  * Idempotent replay of an existing organization creation.
  */
 export const zCreateOrganizationResponse2 = zCreateOrganizationResponse;
+
+export const zDeleteOrganizationPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Organization deleted.
@@ -2358,225 +2573,563 @@ export const zDeleteCurrentUserResponse = z.void();
  */
 export const zGetCurrentUserResponse = zCurrentUser;
 
+export const zListPendingInvitationsQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Pending organization invitations for the authenticated user.
  */
 export const zListPendingInvitationsResponse = zListOrgInvitationsResponse;
+
+export const zAcceptInvitationPath = z.object({
+    invitationID: z.string().regex(/^oinv_[a-z2-7]{26}$/)
+});
 
 /**
  * The accepted invitation; accepting consumes it and creates the membership.
  */
 export const zAcceptInvitationResponse = zOrgInvitation;
 
+export const zDeclineInvitationPath = z.object({
+    invitationID: z.string().regex(/^oinv_[a-z2-7]{26}$/)
+});
+
 /**
  * The declined invitation; declining consumes it.
  */
 export const zDeclineInvitationResponse = zOrgInvitation;
+
+export const zGetOrgOverviewPath = z.object({
+    orgID: zOrganizationId
+});
 
 /**
  * Overview data for the organization.
  */
 export const zGetOrgOverviewResponse = zOrgOverviewResponse;
 
+export const zListVisibleProjectsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListVisibleProjectsQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Projects visible to the authenticated user.
  */
 export const zListVisibleProjectsResponse = zListProjectsResponse;
+
+export const zCreateProjectBody = zCreateProjectRequest;
+
+export const zCreateProjectHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateProjectPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Idempotent replay of an existing project creation.
  */
 export const zCreateProjectResponse = zProject;
 
+export const zDeleteProjectPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * Project deleted.
  */
 export const zDeleteProjectResponse = z.void();
+
+export const zListOrgMembersPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListOrgMembersQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zCreatedResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Members of the organization.
  */
 export const zListOrgMembersResponse2 = zListOrgMembersResponse;
 
+export const zRemoveOrgMemberPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    userID: z.string().regex(/^usr_[a-z2-7]{26}$/)
+});
+
 /**
  * Org member removed.
  */
 export const zRemoveOrgMemberResponse = z.void();
+
+export const zUpdateOrgMemberBody = zUpdateOrgMemberRequest;
+
+export const zUpdateOrgMemberPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    userID: z.string().regex(/^usr_[a-z2-7]{26}$/)
+});
 
 /**
  * Org member role updated.
  */
 export const zUpdateOrgMemberResponse = zOrganizationMembership;
 
+export const zListMemberProjectAccessPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    userID: z.string().regex(/^usr_[a-z2-7]{26}$/)
+});
+
 /**
  * The member's explicit project role grants.
  */
 export const zListMemberProjectAccessResponse = zListProjectMembershipGrantsResponse;
+
+export const zRemoveMemberProjectAccessPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    userID: z.string().regex(/^usr_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
 
 /**
  * Project role grant removed.
  */
 export const zRemoveMemberProjectAccessResponse = z.void();
 
+export const zSetMemberProjectAccessBody = zSetProjectMembershipRequest;
+
+export const zSetMemberProjectAccessPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    userID: z.string().regex(/^usr_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * Project role grant set.
  */
 export const zSetMemberProjectAccessResponse = zProjectMembershipGrant;
+
+export const zListOrgApiKeysPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListOrgApiKeysQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * The organization's API keys.
  */
 export const zListOrgApiKeysResponse2 = zListOrgApiKeysResponse;
 
+export const zCreateOrgApiKeyBody = zCreateOrgApiKeyRequest;
+
+export const zCreateOrgApiKeyPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
 /**
  * Org API key created.
  */
 export const zCreateOrgApiKeyResponse2 = zCreateOrgApiKeyResponse;
+
+export const zGetOrgApiKeyPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/)
+});
 
 /**
  * The org API key.
  */
 export const zGetOrgApiKeyResponse = zOrgApiKey;
 
+export const zUpdateOrgApiKeyBody = zUpdateOrgApiKeyRequest;
+
+export const zUpdateOrgApiKeyPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/)
+});
+
 /**
  * The updated org API key.
  */
 export const zUpdateOrgApiKeyResponse = zOrgApiKey;
+
+export const zRevokeOrgApiKeyPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/)
+});
 
 /**
  * The revoked org API key.
  */
 export const zRevokeOrgApiKeyResponse = zOrgApiKey;
 
+export const zListOrgApiKeyProjectAccessPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/)
+});
+
 /**
  * The key's explicit project role grants.
  */
 export const zListOrgApiKeyProjectAccessResponse = zListProjectMembershipGrantsResponse;
+
+export const zRemoveOrgApiKeyProjectRolePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
 
 /**
  * Project role grant removed.
  */
 export const zRemoveOrgApiKeyProjectRoleResponse = z.void();
 
+export const zSetOrgApiKeyProjectRoleBody = zSetProjectMembershipRequest;
+
+export const zSetOrgApiKeyProjectRolePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    keyID: z.string().regex(/^oak_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * Project role grant set.
  */
 export const zSetOrgApiKeyProjectRoleResponse = zProjectMembershipGrant;
+
+export const zListOrgInvitationsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListOrgInvitationsQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Organization invitations.
  */
 export const zListOrgInvitationsResponse2 = zListOrgInvitationsResponse;
 
+export const zCreateOrgInvitationBody = zCreateOrgInvitationRequest;
+
+export const zCreateOrgInvitationPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
 /**
  * Organization invitation created.
  */
 export const zCreateOrgInvitationResponse = zOrgInvitation;
+
+export const zDeleteOrgInvitationPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    invitationID: z.string().regex(/^oinv_[a-z2-7]{26}$/)
+});
 
 /**
  * Organization invitation deleted.
  */
 export const zDeleteOrgInvitationResponse = z.void();
 
+export const zListSkillsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListSkillsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    owner_kind: z.enum([
+        'org',
+        'project',
+        'user'
+    ]).optional(),
+    owner_project_id: zProjectId.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Skills visible through ownership authority.
  */
 export const zListSkillsResponse2 = zListSkillsResponse;
+
+export const zCreateSkillBody = zCreateSkillRequest;
+
+export const zCreateSkillPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Skill created.
  */
 export const zCreateSkillResponse = zSkill;
 
+export const zDeleteSkillPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    skillID: z.string().regex(/^skl_[a-z2-7]{26}$/)
+});
+
 /**
  * Skill deleted.
  */
 export const zDeleteSkillResponse = z.void();
+
+export const zGetSkillPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    skillID: z.string().regex(/^skl_[a-z2-7]{26}$/)
+});
 
 /**
  * Visible skill metadata and instructions.
  */
 export const zGetSkillResponse = zSkill;
 
+export const zListSkillGrantsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    skillID: zSkillId
+});
+
+export const zListSkillGrantsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zCreatedResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Outgoing skill grants.
  */
 export const zListSkillGrantsResponse2 = zListSkillGrantsResponse;
+
+export const zCreateSkillGrantBody = zSkillGrantCreateRequest;
+
+export const zCreateSkillGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    skillID: zSkillId
+});
 
 /**
  * Skill grant created.
  */
 export const zCreateSkillGrantResponse = zSkillGrant;
 
+export const zDeleteSkillGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    skillID: zSkillId,
+    grantID: zSkillGrantId
+});
+
 /**
  * Skill grant deleted.
  */
 export const zDeleteSkillGrantResponse = z.void();
+
+export const zListProjectAvailableSkillsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: zProjectId
+});
+
+export const zListProjectAvailableSkillsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    owner_kind: z.enum([
+        'org',
+        'project',
+        'user'
+    ]).optional(),
+    availability_source: z.enum(['direct', 'grant']).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Skills available to the project with their availability source.
  */
 export const zListProjectAvailableSkillsResponse = zListProjectSkillAccessesResponse;
 
+export const zListSecretsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListSecretsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    kind: zSecretKind.optional(),
+    owner_kind: z.enum([
+        'org',
+        'project',
+        'user'
+    ]).optional(),
+    owner_project_id: zProjectId.optional(),
+    mcp_oauth_flow_id: zMcpoAuthFlowId.optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Secrets visible through ownership authority.
  */
 export const zListSecretsResponse2 = zListSecretsResponse;
+
+export const zCreateSecretBody = zCreateSecretRequest;
+
+export const zCreateSecretPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Secret created.
  */
 export const zCreateSecretResponse = zSecret;
 
+export const zStartSecretMcpoAuthBody = zMcpoAuthStartRequest;
+
+export const zStartSecretMcpoAuthPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
 /**
  * MCP OAuth flow started.
  */
 export const zStartSecretMcpoAuthResponse = zMcpoAuthStartResponse;
+
+export const zDeleteSecretPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
 
 /**
  * Secret deleted.
  */
 export const zDeleteSecretResponse = z.void();
 
+export const zGetSecretPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
+
 /**
  * Secret.
  */
 export const zGetSecretResponse = zSecret;
+
+export const zUpdateSecretBody = zUpdateSecretRequest;
+
+export const zUpdateSecretPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
 
 /**
  * Secret updated.
  */
 export const zUpdateSecretResponse = zSecret;
 
+export const zCreateSecretVersionBody = zSecretVersionRequest;
+
+export const zCreateSecretVersionPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
+
 /**
  * Secret version created.
  */
 export const zCreateSecretVersionResponse = zSecret;
+
+export const zListSecretGrantsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
+
+export const zListSecretGrantsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zCreatedResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Outgoing secret grants.
  */
 export const zListSecretGrantsResponse2 = zListSecretGrantsResponse;
 
+export const zCreateSecretGrantBody = zSecretGrantCreateRequest;
+
+export const zCreateSecretGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
+
 /**
  * Secret grant created.
  */
 export const zCreateSecretGrantResponse = zSecretGrant;
+
+export const zDeleteSecretGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/),
+    grantID: z.string().regex(/^sgr_[a-z2-7]{26}$/)
+});
 
 /**
  * Secret grant deleted.
  */
 export const zDeleteSecretGrantResponse = z.void();
 
+export const zListIntegrationInstallsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListIntegrationInstallsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    agent_profile_id: zAgentProfileId.optional(),
+    oauth_flow_id: zIntegrationOAuthFlowId.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Integration installs in the project, newest first.
  */
 export const zListIntegrationInstallsResponse2 = zListIntegrationInstallsResponse;
 
+export const zDeleteIntegrationInstallPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    integrationInstallID: z.string().regex(/^iin_[a-z2-7]{26}$/)
+});
+
 /**
  * Integration install deleted.
  */
 export const zDeleteIntegrationInstallResponse = z.void();
+
+export const zCreateAgentConfigBody = zCreateAgentConfigRequest;
+
+export const zCreateAgentConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
 
 /**
  * Existing agent config returned.
@@ -2588,380 +3141,1116 @@ export const zCreateAgentConfigResponse = zAgentConfig;
  */
 export const zGetToolCatalogResponse = zToolCatalog;
 
+export const zGetAgentConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentConfigID: z.string().regex(/^acfg_[a-z2-7]{26}$/)
+});
+
 /**
  * Agent config.
  */
 export const zGetAgentConfigResponse = zAgentConfig;
+
+export const zListAgentProfilesPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListAgentProfilesQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Agent profiles in the project, newest first.
  */
 export const zListAgentProfilesResponse2 = zListAgentProfilesResponse;
 
+export const zCreateAgentProfileBody = zCreateAgentProfileRequest;
+
+export const zCreateAgentProfileHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateAgentProfilePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * Existing agent profile returned.
  */
 export const zCreateAgentProfileResponse = zAgentProfile;
+
+export const zDeleteAgentProfilePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
 
 /**
  * Resource deleted.
  */
 export const zDeleteAgentProfileResponse = z.void();
 
+export const zGetAgentProfilePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
+
 /**
  * Agent profile.
  */
 export const zGetAgentProfileResponse = zAgentProfile;
+
+export const zRenameAgentProfileBody = zRenameAgentProfileRequest;
+
+export const zRenameAgentProfilePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
+
+/**
+ * Agent profile renamed.
+ */
+export const zRenameAgentProfileResponse = zAgentProfile;
+
+export const zUpdateAgentProfileBody = zUpdateAgentProfileRequest;
+
+export const zUpdateAgentProfileHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zUpdateAgentProfilePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
 
 /**
  * Agent profile updated.
  */
 export const zUpdateAgentProfileResponse = zAgentProfile;
 
+export const zCreateIntegrationOAuthSetupBody = zCreateIntegrationOAuthSetupRequest;
+
+export const zCreateIntegrationOAuthSetupPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
+
 /**
  * Integration OAuth setup created.
  */
 export const zCreateIntegrationOAuthSetupResponse = zIntegrationOAuthSetup;
+
+export const zCreateSlackSetupBody = zCreateSlackSetupRequest;
+
+export const zCreateSlackSetupPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentProfileID: z.string().regex(/^aprf_[a-z2-7]{26}$/)
+});
 
 /**
  * Slack app created and OAuth setup started.
  */
 export const zCreateSlackSetupResponse = zSlackSetup;
 
+export const zListCronTriggersPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListCronTriggersQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    agent_id: zAgentId.optional(),
+    agent_profile_id: zAgentProfileId.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
+/**
+ * Cron triggers in the project, newest first.
+ */
+export const zListCronTriggersResponse2 = zListCronTriggersResponse;
+
+export const zCreateCronTriggerBody = zCreateCronTriggerRequest;
+
+export const zCreateCronTriggerHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateCronTriggerPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+/**
+ * Existing cron trigger returned.
+ */
+export const zCreateCronTriggerResponse = zCronTrigger;
+
+export const zDeleteCronTriggerPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    cronTriggerID: zCronTriggerId
+});
+
+/**
+ * Resource deleted.
+ */
+export const zDeleteCronTriggerResponse = z.void();
+
+export const zGetCronTriggerPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    cronTriggerID: zCronTriggerId
+});
+
+/**
+ * Cron trigger.
+ */
+export const zGetCronTriggerResponse = zCronTrigger;
+
+export const zUpdateCronTriggerBody = zUpdateCronTriggerRequest;
+
+export const zUpdateCronTriggerPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    cronTriggerID: zCronTriggerId
+});
+
+/**
+ * Cron trigger updated.
+ */
+export const zUpdateCronTriggerResponse = zCronTrigger;
+
+export const zListAgentsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListAgentsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    agent_profile_id: zAgentProfileId.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Active agents in the project, newest first.
  */
 export const zListAgentsResponse2 = zListAgentsResponse;
 
+export const zCreateAgentBody = zCreateAgentRequest;
+
+export const zCreateAgentHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateAgentPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 export const zCreateAgentResponse = z.union([
-    zGetAgentResponse,
+    zCurrentAgentResponse,
     zLaunchAgentResponse
 ]);
+
+export const zGetAgentPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
 
 /**
  * Agent.
  */
 export const zGetAgentResponse2 = zGetAgentResponse;
 
+export const zArchiveAgentPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
 /**
  * The archived agent.
  */
-export const zArchiveAgentResponse = zGetAgentResponse;
+export const zArchiveAgentResponse = zCurrentAgentResponse;
+
+export const zUpdateAgentConfigBody = zUpdateAgentConfigRequest;
+
+export const zUpdateAgentConfigHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zUpdateAgentConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
 
 /**
  * Agent config updated.
  */
 export const zUpdateAgentConfigResponse2 = zUpdateAgentConfigResponse;
 
+export const zCreateAgentInputBody = zCreateAgentInputRequest;
+
+export const zCreateAgentInputHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateAgentInputPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
 /**
  * Existing agent input returned.
  */
 export const zCreateAgentInputResponse = zAgentInputEnvelope;
+
+export const zListToolCallsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zListToolCallsQuery = z.object({
+    state: zToolCallState.optional(),
+    type: zToolCallType.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Current tool calls.
  */
 export const zListToolCallsResponse2 = zListToolCallsResponse;
 
+export const zSubmitToolCallResultBody = zSubmitToolCallResultRequest;
+
+export const zSubmitToolCallResultPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    toolCallID: zToolCallId
+});
+
 /**
  * Custom tool result accepted and tool call completed.
  */
 export const zSubmitToolCallResultResponse2 = zSubmitToolCallResultResponse;
+
+export const zListTurnsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zListTurnsQuery = z.object({
+    before_turn_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.int().gte(1).lte(100).optional().default(25)
+});
 
 /**
  * Agent turns.
  */
 export const zListTurnsResponse = zListAgentTurnsResponse;
 
+export const zListTurnEventsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    turnID: z.string().regex(/^trn_[a-z2-7]{26}$/)
+});
+
+export const zListTurnEventsQuery = z.object({
+    before_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.int().gte(1).lte(500).optional().default(100)
+});
+
 /**
  * Turn events.
  */
 export const zListTurnEventsResponse2 = zListTurnEventsResponse;
+
+export const zListEventsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zListEventsQuery = z.object({
+    before_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    after_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    limit: z.int().gte(1).lte(500).optional().default(100)
+});
 
 /**
  * Agent events.
  */
 export const zListEventsResponse = zListAgentEventsResponse;
 
+export const zStreamEventsHeaders = z.object({
+    'Last-Event-ID': z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+export const zStreamEventsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zStreamEventsQuery = z.object({
+    after_sequence: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    stream_deltas: z.boolean().optional()
+});
+
 /**
  * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort tool lifecycle updates use `tool_call_update`, model previews use `model_output_delta`, and terminal stream errors use `error`; none carries an SSE `id`, so reconnects resume from the last durable event. Heartbeats are SSE comments and carry no JSON payload.
  */
 export const zStreamEventsResponse = zAgentEventStreamData;
+
+export const zCancelAgentBody = zCancelAgentRequest;
+
+export const zCancelAgentPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
 
 /**
  * Agent canceled.
  */
 export const zCancelAgentResponse2 = zCancelAgentResponse;
 
+export const zListAgentInteractionsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zListAgentInteractionsQuery = z.object({
+    state: zAgentInteractionState.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Agent interactions.
  */
 export const zListAgentInteractionsResponse2 = zListAgentInteractionsResponse;
+
+export const zResolveAgentInteractionBody = zResolveAgentInteractionRequest;
+
+export const zResolveAgentInteractionPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    interactionID: z.string().regex(/^int_[a-z2-7]{26}$/)
+});
 
 /**
  * Agent interaction resolved.
  */
 export const zResolveAgentInteractionResponse = zAgentInteraction;
 
+export const zListQueuedBacklogInputsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/)
+});
+
+export const zListQueuedBacklogInputsQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Queued backlog inputs.
  */
 export const zListQueuedBacklogInputsResponse = zListAgentInputsResponse;
+
+export const zCancelQueuedBacklogInputPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    inputID: z.string().regex(/^ain_[a-z2-7]{26}$/)
+});
 
 /**
  * Queued backlog input canceled.
  */
 export const zCancelQueuedBacklogInputResponse = zOkResponse;
 
+export const zMoveQueuedBacklogInputBody = zMoveQueuedBacklogInputRequest;
+
+export const zMoveQueuedBacklogInputPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    inputID: z.string().regex(/^ain_[a-z2-7]{26}$/)
+});
+
 /**
  * Queued backlog input moved.
  */
 export const zMoveQueuedBacklogInputResponse = zOkResponse;
+
+export const zPromoteQueuedInputToSteeringBody = zPromoteQueuedInputToSteeringRequest;
+
+export const zPromoteQueuedInputToSteeringPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    inputID: z.string().regex(/^ain_[a-z2-7]{26}$/)
+});
 
 /**
  * Queued input promoted to steering.
  */
 export const zPromoteQueuedInputToSteeringResponse = zOkResponse;
 
+export const zDemoteSteeringInputToQueuedPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    inputID: z.string().regex(/^ain_[a-z2-7]{26}$/)
+});
+
 /**
  * Steering input demoted to queued.
  */
 export const zDemoteSteeringInputToQueuedResponse = zOkResponse;
+
+export const zGetArtifactPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    artifactID: z.string().regex(/^art_[a-z2-7]{26}$/)
+});
 
 /**
  * Artifact metadata.
  */
 export const zGetArtifactResponse = zArtifact;
 
+export const zGetArtifactContentPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    agentID: z.string().regex(/^agt_[a-z2-7]{26}$/),
+    artifactID: z.string().regex(/^art_[a-z2-7]{26}$/)
+});
+
 /**
  * Artifact bytes, served with the artifact's stored content type.
  */
 export const zGetArtifactContentResponse = z.string();
+
+export const zListVisibleProjectMachinesPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListVisibleProjectMachinesQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    source_kind: zMachineSourceKind.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Machines visible in the project.
  */
 export const zListVisibleProjectMachinesResponse = zListVisibleMachinesResponse;
 
+export const zListProjectMachineGrantsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListProjectMachineGrantsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Project machine grants.
  */
 export const zListProjectMachineGrantsResponse2 = zListProjectMachineGrantsResponse;
+
+export const zCreateProjectMachineGrantBody = zCreateProjectMachineGrantRequest;
+
+export const zCreateProjectMachineGrantHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateProjectMachineGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
 
 /**
  * Existing project machine grant returned.
  */
 export const zCreateProjectMachineGrantResponse2 = zCreateProjectMachineGrantResponse;
 
+export const zDeleteProjectMachineGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    grantID: z.string().regex(/^pmg_[a-z2-7]{26}$/)
+});
+
 /**
  * Project machine grant deleted.
  */
 export const zDeleteProjectMachineGrantResponse = z.void();
+
+export const zListProjectAvailableSecretsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListProjectAvailableSecretsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    kind: zSecretKind.optional(),
+    owner_kind: z.enum([
+        'org',
+        'project',
+        'user'
+    ]).optional(),
+    availability_source: z.enum(['direct', 'grant']).optional(),
+    metadata: z.record(z.string(), z.string()).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Secrets available to the project.
  */
 export const zListProjectAvailableSecretsResponse = zListProjectSecretAccessesResponse;
 
+export const zGetProjectAvailableSecretPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    secretID: z.string().regex(/^sec_[a-z2-7]{26}$/)
+});
+
 /**
  * Secret available to the project and its availability source.
  */
 export const zGetProjectAvailableSecretResponse = zProjectSecretAccess;
+
+export const zListActorsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListActorsQuery = z.object({
+    provider: zActorProvider.optional(),
+    provider_tenant_id: z.string().optional(),
+    provider_user_id: z.string().optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Project actors.
  */
 export const zListActorsResponse2 = zListActorsResponse;
 
+export const zPutActorBody = zExternalActorParams;
+
+export const zPutActorPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * The upserted actor.
  */
 export const zPutActorResponse = zActor;
+
+export const zGetActorPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    actorID: z.string().regex(/^actr_[a-z2-7]{26}$/)
+});
 
 /**
  * The actor.
  */
 export const zGetActorResponse = zActor;
 
+export const zListVisibleMachinesPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListVisibleMachinesQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    source_kind: zMachineSourceKind.optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Machines visible to the authenticated user.
  */
 export const zListVisibleMachinesResponse2 = zListVisibleMachinesResponse;
+
+export const zCreateMachineBody = zCreateMachineRequest;
+
+export const zCreateMachineHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateMachinePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Existing machine returned.
  */
 export const zCreateMachineResponse = zMachine;
 
+export const zConnectByoMachineBody = zConnectByoMachineRequest;
+
+export const zConnectByoMachinePath = z.object({
+    orgID: zOrganizationId
+});
+
 /**
  * Machine, daemon token, and selected project grants created.
  */
 export const zConnectByoMachineResponse2 = zConnectByoMachineResponse;
+
+export const zDeleteMachinePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/)
+});
 
 /**
  * Resource deleted.
  */
 export const zDeleteMachineResponse = z.void();
 
+export const zGetMachinePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/)
+});
+
 /**
  * Machine.
  */
 export const zGetMachineResponse = zMachine;
+
+export const zUpdateMachineBody = zUpdateMachineRequest;
+
+export const zUpdateMachinePath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/)
+});
 
 /**
  * Machine updated.
  */
 export const zUpdateMachineResponse = zMachine;
 
+export const zListModelProviderConfigsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListModelProviderConfigsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Route response.
  */
 export const zListModelProviderConfigsResponse = zModelProviderConfigList;
+
+export const zCreateModelProviderConfigBody = zCreateModelProviderConfigRequest;
+
+export const zCreateModelProviderConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zCreateModelProviderConfigResponse2 = zCreateModelProviderConfigResponse;
 
+export const zDeleteModelProviderConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/)
+});
+
 /**
  * Resource deleted.
  */
 export const zDeleteModelProviderConfigResponse = z.void();
+
+export const zGetModelProviderConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zGetModelProviderConfigResponse = zModelProviderConfig;
 
+export const zUpdateModelProviderConfigBody = zUpdateModelProviderConfigRequest;
+
+export const zUpdateModelProviderConfigPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/)
+});
+
 /**
  * Route response.
  */
 export const zUpdateModelProviderConfigResponse = zModelProviderConfig;
+
+export const zGetModelCatalogPath = z.object({
+    orgID: zOrganizationId,
+    modelProviderConfigID: zModelProviderConfigId
+});
 
 /**
  * Route response.
  */
 export const zGetModelCatalogResponse = zModelCatalog;
 
+export const zListConfiguredModelsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/)
+});
+
+export const zListConfiguredModelsQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Route response.
  */
 export const zListConfiguredModelsResponse = zConfiguredModelList;
+
+export const zCreateConfiguredModelBody = zCreateConfiguredModelRequest;
+
+export const zCreateConfiguredModelPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zCreateConfiguredModelResponse = zConfiguredModel;
 
+export const zDeleteConfiguredModelPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/),
+    configuredModelID: z.string().regex(/^mdl_[a-z2-7]{26}$/)
+});
+
 /**
  * Resource deleted.
  */
 export const zDeleteConfiguredModelResponse = z.void();
+
+export const zUpdateConfiguredModelBody = zUpdateConfiguredModelRequest;
+
+export const zUpdateConfiguredModelPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    modelProviderConfigID: z.string().regex(/^mpc_[a-z2-7]{26}$/),
+    configuredModelID: z.string().regex(/^mdl_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zUpdateConfiguredModelResponse = zConfiguredModel;
 
+export const zListProjectModelGrantsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListProjectModelGrantsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Route response.
  */
 export const zListProjectModelGrantsResponse2 = zListProjectModelGrantsResponse;
+
+export const zCreateProjectModelGrantBody = zCreateProjectModelGrantRequest;
+
+export const zCreateProjectModelGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zCreateProjectModelGrantResponse = zProjectModelGrantEnvelope;
 
+export const zDeleteProjectModelGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    modelGrantID: z.string().regex(/^pmog_[a-z2-7]{26}$/)
+});
+
 /**
  * Project model grant deleted.
  */
 export const zDeleteProjectModelGrantResponse = z.void();
+
+export const zUpdateProjectModelGrantBody = zUpdateProjectModelGrantRequest;
+
+export const zUpdateProjectModelGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    modelGrantID: z.string().regex(/^pmog_[a-z2-7]{26}$/)
+});
 
 /**
  * Route response.
  */
 export const zUpdateProjectModelGrantResponse = zProjectModelGrantEnvelope;
 
+export const zListMachinePoolsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
+
+export const zListMachinePoolsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Machine pools.
  */
 export const zListMachinePoolsResponse2 = zListMachinePoolsResponse;
+
+export const zCreateMachinePoolBody = zCreateMachinePoolRequest;
+
+export const zCreateMachinePoolPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
+});
 
 /**
  * Existing machine pool returned.
  */
 export const zCreateMachinePoolResponse = zMachinePool;
 
+export const zDeleteMachinePoolPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    poolID: z.string().regex(/^mpo_[a-z2-7]{26}$/)
+});
+
 /**
  * Resource deleted.
  */
 export const zDeleteMachinePoolResponse = z.void();
+
+export const zGetMachinePoolPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    poolID: z.string().regex(/^mpo_[a-z2-7]{26}$/)
+});
 
 /**
  * Machine pool.
  */
 export const zGetMachinePoolResponse = zMachinePool;
 
+export const zUpdateMachinePoolBody = zUpdateMachinePoolRequest;
+
+export const zUpdateMachinePoolPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    poolID: z.string().regex(/^mpo_[a-z2-7]{26}$/)
+});
+
 /**
  * Machine pool updated.
  */
 export const zUpdateMachinePoolResponse = zMachinePool;
+
+export const zListProjectMachinePoolGrantsPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
+export const zListProjectMachinePoolGrantsQuery = z.object({
+    name: z.string().min(1).max(200).optional(),
+    sort: zResourceListSort.optional(),
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
 
 /**
  * Project machine pool grants.
  */
 export const zListProjectMachinePoolGrantsResponse2 = zListProjectMachinePoolGrantsResponse;
 
+export const zCreateProjectMachinePoolGrantBody = zCreateProjectMachinePoolGrantRequest;
+
+export const zCreateProjectMachinePoolGrantHeaders = z.object({
+    'Idempotency-Key': z.string().min(1).max(255).optional()
+});
+
+export const zCreateProjectMachinePoolGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/)
+});
+
 /**
  * Existing project machine pool grant returned.
  */
 export const zCreateProjectMachinePoolGrantResponse = zProjectMachinePoolGrant;
+
+export const zDeleteProjectMachinePoolGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    poolGrantID: z.string().regex(/^pmpg_[a-z2-7]{26}$/)
+});
 
 /**
  * Project machine pool grant deleted.
  */
 export const zDeleteProjectMachinePoolGrantResponse = z.void();
 
+export const zGetProjectMachinePoolGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    poolGrantID: z.string().regex(/^pmpg_[a-z2-7]{26}$/)
+});
+
 /**
  * Project machine pool grant.
  */
 export const zGetProjectMachinePoolGrantResponse = zProjectMachinePoolGrant;
+
+export const zUpdateProjectMachinePoolGrantBody = zUpdateProjectMachinePoolGrantRequest;
+
+export const zUpdateProjectMachinePoolGrantPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    projectID: z.string().regex(/^proj_[a-z2-7]{26}$/),
+    poolGrantID: z.string().regex(/^pmpg_[a-z2-7]{26}$/)
+});
 
 /**
  * Project machine pool grant updated.
  */
 export const zUpdateProjectMachinePoolGrantResponse = zProjectMachinePoolGrant;
 
+export const zListByoMachineDaemonTokensPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/)
+});
+
+export const zListByoMachineDaemonTokensQuery = z.object({
+    limit: z.int().gte(1).lte(100).optional().default(50),
+    cursor: z.string().max(1024).optional()
+});
+
 /**
  * Machine daemon tokens.
  */
 export const zListByoMachineDaemonTokensResponse = zListMachineDaemonTokensResponse;
+
+export const zCreateByoMachineDaemonTokenBody = zCreateMachineDaemonTokenRequest;
+
+export const zCreateByoMachineDaemonTokenPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/)
+});
 
 /**
  * Machine daemon token created.
  */
 export const zCreateByoMachineDaemonTokenResponse = zCreateMachineDaemonTokenResponse;
 
+export const zRevokeMachineDaemonTokenPath = z.object({
+    orgID: z.string().regex(/^org_[a-z2-7]{26}$/),
+    machineID: z.string().regex(/^mch_[a-z2-7]{26}$/),
+    tokenID: z.string().regex(/^mdt_[a-z2-7]{26}$/)
+});
+
 /**
  * Machine daemon token revoked.
  */
 export const zRevokeMachineDaemonTokenResponse = zMachineDaemonToken;
+
+export const zRegisterMachineDaemonRuntimeBody = zRegisterDaemonRuntimeRequest;
 
 /**
  * Machine daemon runtime registered.
  */
 export const zRegisterMachineDaemonRuntimeResponse = zRegisterDaemonRuntimeResponse;
 
+export const zSocketMachineDaemonRuntimePath = z.object({
+    runtimeID: z.string().regex(/^drt_[a-z2-7]{26}$/)
+});
+
+export const zEndMachineDaemonRuntimePath = z.object({
+    runtimeID: z.string().regex(/^drt_[a-z2-7]{26}$/)
+});
+
 /**
  * Machine daemon runtime ended.
  */
 export const zEndMachineDaemonRuntimeResponse = zDaemonRuntime;
 
+export const zSleepMachineDaemonRuntimePath = z.object({
+    runtimeID: z.string().regex(/^drt_[a-z2-7]{26}$/)
+});
+
 /**
  * Machine daemon runtime ended for sleep; machine marked asleep.
  */
 export const zSleepMachineDaemonRuntimeResponse = zDaemonRuntime;
+
+export const zGetDaemonSkillArchivePath = z.object({
+    skillID: z.string().regex(/^skl_[a-z2-7]{26}$/)
+});
+
+export const zGetDaemonSkillArchiveQuery = z.object({
+    revision_id: z.string().regex(/^skr_[a-z2-7]{26}$/),
+    expires_at: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    download_token: z.string().length(64)
+});
 
 /**
  * Skill archive bytes.

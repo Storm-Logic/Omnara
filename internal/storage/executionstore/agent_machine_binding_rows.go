@@ -4,6 +4,31 @@ import "github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
 
 func agentMachineBindingRecordFromSQLC(row dbsqlc.AgentMachineBinding) AgentMachineBindingRecord {
 	return AgentMachineBindingRecord{
+		ID:                     row.ID,
+		OrgID:                  row.OrgID,
+		ProjectID:              row.ProjectID,
+		AgentID:                row.AgentID,
+		CreateToolCallID:       idFromSQLCPtr(row.CreateToolCallID),
+		DeleteToolCallID:       idFromSQLCPtr(row.DeleteToolCallID),
+		MachineID:              row.MachineID,
+		MachineRef:             row.MachineRef,
+		BindingKind:            AgentMachineBindingKind(row.BindingKind),
+		State:                  AgentMachineBindingState(row.State),
+		Description:            row.Description,
+		Cwd:                    row.Cwd,
+		EnvOverlay:             row.EnvOverlay,
+		SecretEnvOverlay:       row.SecretEnvOverlay,
+		DeleteAfterIdleMinutes: intPtrFromSQLC(row.DeleteAfterIdleMinutes),
+		Metadata:               row.Metadata,
+		CreatedAt:              row.CreatedAt,
+		UpdatedAt:              row.UpdatedAt,
+	}
+}
+
+func agentMachineBindingRecordFromListSQLC(
+	row dbsqlc.ListAgentMachineBindingsRow,
+) AgentMachineBindingRecord {
+	return AgentMachineBindingRecord{
 		ID:               row.ID,
 		OrgID:            row.OrgID,
 		ProjectID:        row.ProjectID,
@@ -15,7 +40,7 @@ func agentMachineBindingRecordFromSQLC(row dbsqlc.AgentMachineBinding) AgentMach
 		BindingKind:      AgentMachineBindingKind(row.BindingKind),
 		State:            AgentMachineBindingState(row.State),
 		Description:      row.Description,
-		Cwd:              row.Cwd,
+		Cwd:              row.EffectiveCwd,
 		EnvOverlay:       row.EnvOverlay,
 		SecretEnvOverlay: row.SecretEnvOverlay,
 		Metadata:         row.Metadata,

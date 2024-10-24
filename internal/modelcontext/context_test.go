@@ -370,161 +370,20 @@ func TestBuildPreservesStructuredProcessResultValues(t *testing.T) {
 	}
 }
 
-func TestBuildProjectsActiveProcessWorkAsObservationRefs(t *testing.T) {
-	processID := testIDN(910)
-	store := &fakeContextStore{
-		watermark: 12,
-		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, toolcatalog.ToolNameReadProcess),
-		activeWork: []executionstore.ActiveProcessRecord{
-			{
-				ID:            processID,
-				State:         executionstore.ProcessStateRunning,
-				MachineID:     testIDN(911),
-				Command:       "go test ./...",
-				ShellSelector: "default",
-				ToolCallID:    testIDN(912),
-			},
-		},
-	}
-	bundle, err := (Builder{Store: store}).Build(
-		context.Background(),
-		BuildInput{
-			ProjectID:       testProjectID,
-			AgentID:         testAgentID,
-			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
-			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	processHandle, err := publicid.Encode(publicid.KindProcess, processID)
-	if err != nil {
-		t.Fatalf("encode process id: %v", err)
-	}
-	if len(bundle.ActiveProcesses) != 1 || bundle.ActiveProcesses[0].ProcessID != processHandle {
-		t.Fatalf("expected active process context, got %+v", bundle.ActiveProcesses)
-	}
-	serialized := string(contextFixtureJSON(t, bundle))
-	for _, internal := range []string{"provider_allocation", "env_1", testIDN(911).String(), "argv"} {
-		if strings.Contains(serialized, internal) {
-			t.Fatalf("active work projection must not expose %s internals: %s", internal, serialized)
-		}
-	}
-}
-
-func TestBuildProjectsExecutableMachinesAsSelectorRefs(t *testing.T) {
-	machineID := testIDN(920)
-	bindingID := testIDN(1920)
-	store := &fakeContextStore{
-		watermark: 13,
-		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, toolcatalog.ToolNameInspectMachine),
-		executableMachineBindings: []executionstore.AgentMachineBindingRecord{
-			{
-				ID:          bindingID,
-				MachineID:   machineID,
-				MachineRef:  "mchr-abc234",
-				Description: "Primary machine",
-				Cwd:         "/workspace",
-			},
-		},
-	}
-	bundle, err := (Builder{Store: store}).Build(
-		context.Background(),
-		BuildInput{
-			ProjectID:       testProjectID,
-			AgentID:         testAgentID,
-			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
-			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	if len(bundle.AttachedMachines) != 1 ||
-		bundle.AttachedMachines[0].MachineRef != "mchr-abc234" ||
-		bundle.AttachedMachines[0].Description != "Primary machine" ||
-		bundle.AttachedMachines[0].Cwd != "/workspace" {
-		t.Fatalf("expected attached machine context, got %+v", bundle.AttachedMachines)
-	}
-	if serialized := string(contextFixtureJSON(t, bundle)); strings.Contains(serialized, machineID.String()) {
-		t.Fatalf("active machine projection must not expose raw machine id: %s", serialized)
-	}
-	if serialized := string(contextFixtureJSON(t, bundle)); strings.Contains(serialized, bindingID.String()) {
-		t.Fatalf("attached machine context must not expose durable binding id: %s", serialized)
-	}
-}
-
-func TestBuildOmitsMachineSelectorRefsWhenNoExecutableBindingsExist(t *testing.T) {
-	store := &fakeContextStore{
-		watermark: 14,
-		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, toolcatalog.ToolNameInspectMachine),
-	}
-	bundle, err := (Builder{Store: store}).Build(
-		context.Background(),
-		BuildInput{
-			ProjectID:       testProjectID,
-			AgentID:         testAgentID,
-			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
-			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	if len(bundle.AttachedMachines) != 0 {
-		t.Fatalf("expected no machine selector refs, got %+v", bundle.AttachedMachines)
-	}
-}
-
-func TestBuildOmitsExecutionContextWithoutRelevantTools(t *testing.T) {
-	store := &fakeContextStore{
-		watermark: 15,
-		activeWork: []executionstore.ActiveProcessRecord{{
-			ID:    testIDN(930),
-			State: executionstore.ProcessStateRunning,
-		}},
-		executableMachineBindings: []executionstore.AgentMachineBindingRecord{{
-			ID:         testIDN(931),
-			MachineID:  testIDN(932),
-			MachineRef: "mchr-abc234",
-		}},
-	}
-	bundle, err := (Builder{Store: store}).Build(context.Background(), BuildInput{
-		ProjectID:       testProjectID,
-		AgentID:         testAgentID,
-		TurnID:          testTurnID,
-		OpeningInputIDs: []storage.ID{testInputID},
-		Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	if len(bundle.ActiveProcesses) != 0 || len(bundle.AttachedMachines) != 0 {
-		t.Fatalf("execution context must follow the tool contract: %+v", bundle)
-	}
-}
-
 func TestBuildProjectsIntegrationTargets(t *testing.T) {
 	targetID := testIDN(940)
 	store := &fakeContextStore{
 		watermark: 15,
 		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, toolcatalog.ToolNameSendIntegrationMessage),
+		config:    testAgentConfigRecord(),
 		integrationTargets: []integrationstore.IntegrationTargetSummary{{
 			ID:              targetID,
 			TargetRef:       "slack-abcd",
 			Provider:        integrationstore.IntegrationProviderSlack,
+			InstallState:    integrationstore.IntegrationInstallStateDisabled,
 			ProviderRef:     "C123:1712345678.000100",
 			ProviderRefKind: "thread",
 			DisplayName:     "general",
-			IsCurrent:       true,
 		}},
 	}
 	bundle, err := (Builder{Store: store}).Build(
@@ -540,9 +399,14 @@ func TestBuildProjectsIntegrationTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	if len(bundle.ToolSpecs) != 1 ||
+		bundle.ToolSpecs[0].Name != toolcatalog.ToolNameSendIntegrationMessage ||
+		bundle.ToolSpecs[0].Permission.Mode != toolpermission.ModeAlwaysAllow {
+		t.Fatalf("expected implicit integration send tool, got %+v", bundle.ToolSpecs)
+	}
 	if len(bundle.IntegrationTargets) != 1 ||
 		bundle.IntegrationTargets[0].TargetRef != "slack-abcd" ||
-		!bundle.IntegrationTargets[0].IsCurrent {
+		bundle.IntegrationTargets[0].IsCurrent {
 		t.Fatalf("expected integration target projection, got %+v", bundle.IntegrationTargets)
 	}
 	if serialized := string(contextFixtureJSON(t, bundle)); strings.Contains(serialized, targetID.String()) {
@@ -556,14 +420,32 @@ func TestBuildProjectsIntegrationTargets(t *testing.T) {
 	}
 }
 
-func TestBuildOmitsIntegrationTargetsForAskQuestion(t *testing.T) {
+func TestBuildExplicitlyDisabledIntegrationSendToolOverridesImplicitTarget(t *testing.T) {
+	result, err := agentconfig.Compile(agentconfig.SourceFormatYAML, []byte(`
+instruction: Help the user make progress.
+model:
+  provider_config: deterministic-test
+  name: deterministic-owned-kernel-test
+tools:
+  ask_question: {}
+  send_integration_message:
+    enabled: false
+`), agentconfig.CompileOptions{})
+	if err != nil {
+		t.Fatalf("compile disabled integration send config: %v", err)
+	}
 	store := &fakeContextStore{
 		watermark: 15,
 		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, toolcatalog.ToolNameAskQuestion),
+		config: executionstore.AgentConfigRecord{
+			ID:                      testIDN(941),
+			CompiledDefinition:      json.RawMessage(result.CanonicalJSON),
+			CompilerVersion:         agentconfig.CompilerVersion,
+			EffectiveDefinitionHash: result.Hash,
+		},
 		integrationTargets: []integrationstore.IntegrationTargetSummary{{
-			ID:        testIDN(941),
-			TargetRef: "slack-abcd",
+			ID:        testIDN(942),
+			TargetRef: "slack-disabled",
 			Provider:  integrationstore.IntegrationProviderSlack,
 		}},
 	}
@@ -580,8 +462,14 @@ func TestBuildOmitsIntegrationTargetsForAskQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	if HasTool(bundle.ToolSpecs, toolcatalog.ToolNameSendIntegrationMessage) {
+		t.Fatalf("explicitly disabled integration send tool was exposed: %+v", bundle.ToolSpecs)
+	}
+	if !HasTool(bundle.ToolSpecs, toolcatalog.ToolNameAskQuestion) {
+		t.Fatalf("explicitly enabled ask question tool was not exposed: %+v", bundle.ToolSpecs)
+	}
 	if len(bundle.IntegrationTargets) != 0 {
-		t.Fatalf("integration targets leaked into ask_question context: %+v", bundle.IntegrationTargets)
+		t.Fatalf("integration targets leaked without an integration tool: %+v", bundle.IntegrationTargets)
 	}
 }
 
@@ -651,8 +539,6 @@ type fakeContextStore struct {
 	messages                   []executionstore.ContextEventRecord
 	toolCalls                  []executionstore.ToolCallRecord
 	completedToolCallWatermark int64
-	activeWork                 []executionstore.ActiveProcessRecord
-	executableMachineBindings  []executionstore.AgentMachineBindingRecord
 	integrationTargets         []integrationstore.IntegrationTargetSummary
 	machinePools               []executionstore.MachinePoolSourceRecord
 	watermark                  int64
@@ -766,26 +652,6 @@ func (s *fakeContextStore) ListCompletedToolCallsAtWatermark(
 		out = append(out, toolCall)
 	}
 	return out, nil
-}
-
-func (s *fakeContextStore) ListActiveProcessesForContext(
-	ctx context.Context,
-	projectID, agentID storage.ID,
-) ([]executionstore.ActiveProcessRecord, error) {
-	_ = ctx
-	_ = projectID
-	_ = agentID
-	return s.activeWork, nil
-}
-
-func (s *fakeContextStore) ListExecutableAgentMachineBindings(
-	ctx context.Context,
-	projectID, agentID storage.ID,
-) ([]executionstore.AgentMachineBindingRecord, error) {
-	_ = ctx
-	_ = projectID
-	_ = agentID
-	return s.executableMachineBindings, nil
 }
 
 func (s *fakeContextStore) ListIntegrationTargets(

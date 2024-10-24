@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"github.com/omnara-ai/omnara/internal/agentconfig"
-	"github.com/omnara-ai/omnara/internal/processcmd"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
@@ -96,6 +94,14 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
+	integrationTargets, err := b.Store.ListIntegrationTargets(ctx, input.ProjectID, input.AgentID)
+	if err != nil {
+		return Bundle{}, err
+	}
+	contract, err = WithImplicitIntegrationMessageTool(contract, integrationTargets)
+	if err != nil {
+		return Bundle{}, err
+	}
 	toolSpecs, err := RuntimeContractToolSpecs(
 		ctx,
 		b.Store,
@@ -153,75 +159,19 @@ func (b Builder) Build(ctx context.Context, input BuildInput) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
-	var activeProcesses []executionstore.ActiveProcessRecord
-	if ProcessContextEnabled(toolSpecs) {
-		activeProcesses, err = b.Store.ListActiveProcessesForContext(
-			ctx,
-			input.ProjectID,
-			input.AgentID,
-		)
-		if err != nil {
-			return Bundle{}, err
-		}
-	}
-	var executableMachineBindings []executionstore.AgentMachineBindingRecord
-	if MachineContextEnabled(toolSpecs) {
-		executableMachineBindings, err = b.Store.ListExecutableAgentMachineBindings(
-			ctx,
-			input.ProjectID,
-			input.AgentID,
-		)
-		if err != nil {
-			return Bundle{}, err
-		}
-	}
-	var integrationTargets []integrationstore.IntegrationTargetSummary
 	if IntegrationTargetContextEnabled(toolSpecs) {
-		integrationTargets, err = b.Store.ListIntegrationTargets(ctx, input.ProjectID, input.AgentID)
-		if err != nil {
-			return Bundle{}, err
+		bundle.IntegrationTargets = make([]IntegrationTargetRef, 0, len(integrationTargets))
+		for _, target := range integrationTargets {
+			bundle.IntegrationTargets = append(bundle.IntegrationTargets, IntegrationTargetRef{
+				TargetRef:       target.TargetRef,
+				DurableID:       target.ID.String(),
+				Provider:        target.Provider,
+				ProviderRefKind: target.ProviderRefKind,
+				Label:           integrationTargetLabel(target),
+				InstallState:    string(target.InstallState),
+				IsCurrent:       target.IsCurrent,
+			})
 		}
-	}
-	bundle.ActiveProcesses = make([]ActiveProcessRef, 0, len(activeProcesses))
-	for _, work := range activeProcesses {
-		processID, err := publicid.Encode(publicid.KindProcess, work.ID)
-		if err != nil {
-			return Bundle{}, err
-		}
-		bundle.ActiveProcesses = append(
-			bundle.ActiveProcesses,
-			ActiveProcessRef{
-				ProcessID:     processID,
-				State:         string(work.State),
-				CommandLabel:  processcmd.CommandLabel(work.Command),
-				Command:       work.Command,
-				ShellSelector: string(work.ShellSelector),
-				Cwd:           work.Cwd,
-			},
-		)
-	}
-	bundle.AttachedMachines = make([]AttachedMachineRef, 0, len(executableMachineBindings))
-	for _, binding := range executableMachineBindings {
-		bundle.AttachedMachines = append(
-			bundle.AttachedMachines,
-			AttachedMachineRef{
-				MachineRef:  binding.MachineRef,
-				Description: binding.Description,
-				Cwd:         binding.Cwd,
-			},
-		)
-	}
-	bundle.IntegrationTargets = make([]IntegrationTargetRef, 0, len(integrationTargets))
-	for _, target := range integrationTargets {
-		bundle.IntegrationTargets = append(bundle.IntegrationTargets, IntegrationTargetRef{
-			TargetRef:       target.TargetRef,
-			DurableID:       target.ID.String(),
-			Provider:        target.Provider,
-			ProviderRefKind: target.ProviderRefKind,
-			Label:           integrationTargetLabel(target),
-			InstallState:    string(target.InstallState),
-			IsCurrent:       target.IsCurrent,
-		})
 	}
 	for _, toolCall := range toolCalls {
 		parts := toolCall.ResultContentParts

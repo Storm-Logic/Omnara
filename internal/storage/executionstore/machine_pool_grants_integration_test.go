@@ -557,6 +557,7 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 	updatedMinMachineMemoryMB := 1024
 	updatedMaxMachineCPU := 4
 	updatedMaxMachineMemoryMB := 8192
+	updatedDeleteAfterIdleMinutes := 30
 	updated, err := store.Execution().UpdateMachinePool(ctx, machinePoolUpdateInputWithDefaultMachineForTest(
 		executionstore.UpdateMachinePoolInput{
 			OrgID:                testOrgID,
@@ -573,7 +574,10 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 			MinMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMinMachineMemoryMB},
 			MaxMachineCPU:        patch.NullableInt{Set: true, Value: &updatedMaxMachineCPU},
 			MaxMachineMemoryMB:   patch.NullableInt{Set: true, Value: &updatedMaxMachineMemoryMB},
-			Metadata:             resourcemeta.Metadata{"team": "infra"},
+			DeleteAfterIdleMinutes: patch.NullableInt{
+				Set: true, Value: &updatedDeleteAfterIdleMinutes,
+			},
+			Metadata: resourcemeta.Metadata{"team": "infra"},
 		},
 		defaultMachineUpdateFieldsForTest{
 			DefaultMachineCPU:             intPtrForMachinePoolTest(2),
@@ -595,7 +599,8 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 		updated.MinMachineCPU == nil || *updated.MinMachineCPU != 1 ||
 		updated.MinMachineMemoryMB == nil || *updated.MinMachineMemoryMB != 1024 ||
 		updated.MaxMachineCPU == nil || *updated.MaxMachineCPU != 4 ||
-		updated.MaxMachineMemoryMB == nil || *updated.MaxMachineMemoryMB != 8192 {
+		updated.MaxMachineMemoryMB == nil || *updated.MaxMachineMemoryMB != 8192 ||
+		updated.DeleteAfterIdleMinutes == nil || *updated.DeleteAfterIdleMinutes != 30 {
 		t.Fatalf("update did not apply mutable fields: %+v", updated)
 	}
 	if machinePoolProviders.validatedProvider != "test.provider" {
@@ -634,6 +639,7 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 	if patched.Name != updated.Name || patched.Description != patchDescription ||
 		patched.DefaultCwd != updated.DefaultCwd || patched.ProviderAuthSecretID != updated.ProviderAuthSecretID ||
 		!sameIntPtr(patched.MaxTotalCPU, updated.MaxTotalCPU) ||
+		!sameIntPtr(patched.DeleteAfterIdleMinutes, updated.DeleteAfterIdleMinutes) ||
 		!sameIntPtr(patched.DefaultMachineCPU, updated.DefaultMachineCPU) ||
 		!sameIntPtr(patched.DefaultMachineMemoryMB, updated.DefaultMachineMemoryMB) ||
 		!sameJSON(patched.DefaultMachineEnv, updated.DefaultMachineEnv) ||
@@ -641,6 +647,16 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 		!sameJSON(patched.DefaultMachineProviderOptions, updated.DefaultMachineProviderOptions) ||
 		!sameJSON(patched.ProviderConfig, updated.ProviderConfig) || !sameJSON(patched.Metadata, updated.Metadata) {
 		t.Fatalf("patch did not preserve omitted fields: before=%+v after=%+v", updated, patched)
+	}
+	cleared, err := store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{
+		OrgID: testOrgID, ID: created.ID,
+		DeleteAfterIdleMinutes: patch.NullableInt{Set: true},
+	})
+	if err != nil {
+		t.Fatalf("clear machine pool idle deletion policy: %v", err)
+	}
+	if cleared.DeleteAfterIdleMinutes != nil {
+		t.Fatalf("cleared machine pool idle deletion policy = %v, want nil", cleared.DeleteAfterIdleMinutes)
 	}
 	badMaxMachineCPU := 1
 	if _, err := store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{
@@ -664,16 +680,76 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 		t,
 		ctx,
 		store,
-		executionstore.CreateMachinePoolInput{
-			OrgID:            testOrgID,
-			Name:             "Hosted Default Pool",
-			Provider:         "test.provider",
-			MaxTotalMachines: 1,
-		},
+		machinePoolInputWithDefaultMachineForTest(
+			executionstore.CreateMachinePoolInput{
+				OrgID:            testOrgID,
+				Name:             "Hosted Default Pool",
+				Provider:         "test.provider",
+				MaxTotalMachines: 1,
+			},
+			defaultMachineFieldsForTest{
+				DefaultMachineCPU:             1,
+				DefaultMachineMemoryMB:        1024,
+				DefaultMachineProviderOptions: json.RawMessage(`{"image":"cluster","sleep_after_ms":30000}`),
+			},
+		),
 	)
+	clusterDefaultCPU := 2
+	clusterDefaultMemoryMB := 2048
+	clusterMinCPU := 1
+	clusterMinMemoryMB := 1024
+	clusterMaxCPU := 4
+	clusterMaxMemoryMB := 4096
+	clusterDeleteAfterIdleMinutes := 30
+	clusterSecretEnv := json.RawMessage(fmt.Sprintf(
+		`{"TOKEN":%q}`,
+		secretPublicIDForTest(t, rotatedProviderAuthSecretID),
+	))
+	updatedDefaultPool, err := store.Execution().UpdateMachinePool(ctx, machinePoolUpdateInputWithDefaultMachineForTest(
+		executionstore.UpdateMachinePoolInput{
+			OrgID:                  testOrgID,
+			ID:                     defaultPool.ID,
+			MinMachineCPU:          patch.NullableInt{Set: true, Value: &clusterMinCPU},
+			MinMachineMemoryMB:     patch.NullableInt{Set: true, Value: &clusterMinMemoryMB},
+			MaxMachineCPU:          patch.NullableInt{Set: true, Value: &clusterMaxCPU},
+			MaxMachineMemoryMB:     patch.NullableInt{Set: true, Value: &clusterMaxMemoryMB},
+			DeleteAfterIdleMinutes: patch.NullableInt{Set: true, Value: &clusterDeleteAfterIdleMinutes},
+		},
+		defaultMachineUpdateFieldsForTest{
+			DefaultMachineCPU:       &clusterDefaultCPU,
+			DefaultMachineMemoryMB:  &clusterDefaultMemoryMB,
+			DefaultMachineEnv:       json.RawMessage(`{"ALLOWED":"yes"}`),
+			DefaultMachineSecretEnv: clusterSecretEnv,
+		},
+	))
+	if err != nil {
+		t.Fatalf("update cluster-managed machine pool editable fields: %v", err)
+	}
+	if updatedDefaultPool.DefaultMachineCPU == nil || *updatedDefaultPool.DefaultMachineCPU != clusterDefaultCPU ||
+		updatedDefaultPool.DefaultMachineMemoryMB == nil || *updatedDefaultPool.DefaultMachineMemoryMB != clusterDefaultMemoryMB ||
+		updatedDefaultPool.MinMachineCPU == nil || *updatedDefaultPool.MinMachineCPU != clusterMinCPU ||
+		updatedDefaultPool.MinMachineMemoryMB == nil || *updatedDefaultPool.MinMachineMemoryMB != clusterMinMemoryMB ||
+		updatedDefaultPool.MaxMachineCPU == nil || *updatedDefaultPool.MaxMachineCPU != clusterMaxCPU ||
+		updatedDefaultPool.MaxMachineMemoryMB == nil || *updatedDefaultPool.MaxMachineMemoryMB != clusterMaxMemoryMB ||
+		updatedDefaultPool.DeleteAfterIdleMinutes == nil || *updatedDefaultPool.DeleteAfterIdleMinutes != clusterDeleteAfterIdleMinutes ||
+		!sameJSON(updatedDefaultPool.DefaultMachineEnv, json.RawMessage(`{"ALLOWED":"yes"}`)) ||
+		!sameJSON(updatedDefaultPool.DefaultMachineSecretEnv, clusterSecretEnv) ||
+		!sameJSON(updatedDefaultPool.DefaultMachineProviderOptions, json.RawMessage(`{"image":"cluster","sleep_after_ms":30000}`)) {
+		t.Fatalf("cluster-managed editable fields not updated: %+v", updatedDefaultPool)
+	}
 	defaultDescription := "not allowed"
 	if _, err := store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{OrgID: testOrgID, ID: defaultPool.ID, Description: &defaultDescription}); !errors.Is(err, storeerr.ErrStateTransitionConflict) {
-		t.Fatalf("cluster-managed update error = %v, want ErrStateTransitionConflict", err)
+		t.Fatalf("cluster-managed description update error = %v, want ErrStateTransitionConflict", err)
+	}
+	if _, err := store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{
+		OrgID: testOrgID, ID: defaultPool.ID,
+		DefaultMachineProviderOptions: json.RawMessage(`{"image":"cluster","sleep_after_ms":30000,"startup_script":"echo ready"}`),
+	}); !errors.Is(err, storeerr.ErrStateTransitionConflict) {
+		t.Fatalf("cluster-managed provider options update error = %v, want ErrStateTransitionConflict", err)
+	}
+	clusterMaxTotalMachines := int32(2)
+	if _, err := store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{OrgID: testOrgID, ID: defaultPool.ID, MaxTotalMachines: &clusterMaxTotalMachines}); !errors.Is(err, storeerr.ErrStateTransitionConflict) {
+		t.Fatalf("cluster-managed quota update error = %v, want ErrStateTransitionConflict", err)
 	}
 	if _, err := store.Execution().DeleteMachinePool(ctx, testOrgID, defaultPool.ID); !errors.Is(err, storeerr.ErrStateTransitionConflict) {
 		t.Fatalf("cluster-managed archive error = %v, want ErrStateTransitionConflict", err)
@@ -682,7 +758,9 @@ func TestUpdateMachinePoolMutatesConfigAndKeepsProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get cluster-managed pool after rejected update/archive: %v", err)
 	}
-	if preservedDefaultPool.Description == defaultDescription || preservedDefaultPool.DeletedAt != nil {
+	if preservedDefaultPool.Description == defaultDescription ||
+		preservedDefaultPool.MaxTotalMachines != defaultPool.MaxTotalMachines ||
+		preservedDefaultPool.DeletedAt != nil {
 		t.Fatalf("cluster-managed pool changed after rejected update/archive: %+v", preservedDefaultPool)
 	}
 }
@@ -829,6 +907,14 @@ func TestMachineConfigEnvRejectsReservedOmnaraNamespace(t *testing.T) {
 		IdempotencyKey: "idem-reserved-agent-source-env-grant",
 	}); err != nil {
 		t.Fatalf("create valid pool grant: %v", err)
+	}
+	if _, err := store.Execution().CreateProjectMachinePoolGrant(ctx, executionstore.CreateProjectMachinePoolGrantInput{
+		OrgID:          testOrgID,
+		ProjectID:      testProjectID,
+		MachinePoolID:  machinePool.ID,
+		IdempotencyKey: "idem-duplicate-pool-grant",
+	}); !errors.Is(err, storeerr.ErrConflict) {
+		t.Fatalf("duplicate pool grant error = %v, want ErrConflict", err)
 	}
 	compiled := mustCompileAgentYAMLWithMachineSourceResolvers(t, ctx, store, `
 instruction: Use the pool.
@@ -2757,8 +2843,9 @@ func TestMachinePoolListSupportsServerSideSearchSortAndPagination(t *testing.T) 
 	pool := openIntegrationDB(t, ctx)
 	seedMigratedDB(t, ctx, pool)
 	store := newIntegrationStore(pool, WithMachinePoolProviders(mergingMachinePoolProviders{}))
+	machinePools := make(map[string]executionstore.MachinePoolRecord)
 	for _, name := range []string{"list-beta", "list-alpha", "list-gamma"} {
-		if _, err := store.Execution().CreateMachinePool(
+		created, err := store.Execution().CreateMachinePool(
 			ctx,
 			completeMachinePoolCreateInputForTest(
 				t,
@@ -2771,9 +2858,34 @@ func TestMachinePoolListSupportsServerSideSearchSortAndPagination(t *testing.T) 
 					MaxTotalMachines: 2,
 				},
 			),
-		); err != nil {
+		)
+		if err != nil {
 			t.Fatalf("create machine pool %q: %v", name, err)
 		}
+		machinePools[name] = created
+	}
+	now := time.Now().UTC()
+	if _, err := pool.Exec(ctx, `
+INSERT INTO machines(
+    id, org_id, machine_pool_id, source_kind, provider, lifecycle_state,
+    lifecycle_changed_at, provider_resource_id, cpu, memory_mb, provider_options,
+    deleted_at, created_at, updated_at
+) VALUES
+    ($1, $2, $3, 'pool', 'test', 'active', $4, 'list-alpha-active', 3, 2048, '{}'::jsonb, NULL, $4, $4),
+    ($5, $2, $3, 'pool', 'test', 'deleted', $4, 'list-alpha-deleted', 8, 8192, '{}'::jsonb, $4, $4, $4),
+    ($6, $2, $7, 'pool', 'test', 'active', $4, 'list-beta-known', 2, 2048, '{}'::jsonb, NULL, $4, $4),
+    ($8, $2, $7, 'pool', 'test', 'active', $4, 'list-beta-resolved', NULL, 1024, '{}'::jsonb, NULL, $4, $4)
+`,
+		testID("list_alpha_active"),
+		testOrgID,
+		machinePools["list-alpha"].ID,
+		now,
+		testID("list_alpha_deleted"),
+		testID("list_beta_known"),
+		machinePools["list-beta"].ID,
+		testID("list_beta_resolved"),
+	); err != nil {
+		t.Fatalf("seed machine pool usage: %v", err)
 	}
 
 	first, err := store.Execution().ListMachinePools(ctx, executionstore.ListMachinePoolsInput{
@@ -2787,6 +2899,12 @@ func TestMachinePoolListSupportsServerSideSearchSortAndPagination(t *testing.T) 
 	if len(first.Pools) != 2 || !first.HasMore ||
 		first.Pools[0].Name != "list-alpha" || first.Pools[1].Name != "list-beta" {
 		t.Fatalf("first machine pool page = %+v, want alpha and beta with more", first)
+	}
+	if usage := first.Pools[0].Usage; usage.Machines != 1 || usage.CPU != 3 || usage.MemoryMB != 2048 {
+		t.Fatalf("list-alpha usage = %+v, want 1 machine, 3 CPU, 2048 MB", usage)
+	}
+	if usage := first.Pools[1].Usage; usage.Machines != 2 || usage.CPU != 2 || usage.MemoryMB != 3072 {
+		t.Fatalf("list-beta usage = %+v, want 2 machines, 2 CPU, 3072 MB", usage)
 	}
 	second, err := store.Execution().ListMachinePools(ctx, executionstore.ListMachinePoolsInput{
 		OrgID: testOrgID,
@@ -2802,6 +2920,9 @@ func TestMachinePoolListSupportsServerSideSearchSortAndPagination(t *testing.T) 
 	}
 	if len(second.Pools) != 1 || second.HasMore || second.Pools[0].Name != "list-gamma" {
 		t.Fatalf("second machine pool page = %+v, want gamma without more", second)
+	}
+	if usage := second.Pools[0].Usage; usage.Machines != 0 || usage.CPU != 0 || usage.MemoryMB != 0 {
+		t.Fatalf("list-gamma usage = %+v, want zero usage", usage)
 	}
 
 	descending, err := store.Execution().ListMachinePools(ctx, executionstore.ListMachinePoolsInput{
@@ -2884,6 +3005,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		MaxTotalCPU:              intPtrForMachinePoolTest(8),
 		MinMachineCPU:            intPtrForMachinePoolTest(0),
 		MaxMachineCPU:            intPtrForMachinePoolTest(4),
+		DeleteAfterIdleMinutes:   intPtrForMachinePoolTest(15),
 	})
 	if err != nil {
 		t.Fatalf("create grant: %v", err)
@@ -2891,6 +3013,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 
 	description := "after"
 	memory4096 := 4096
+	deleteAfterIdleMinutes := 30
 	envOverlay := json.RawMessage(`{"NEW":"value"}`)
 	updated, err := store.Execution().UpdateProjectMachinePoolGrant(ctx, executionstore.UpdateProjectMachinePoolGrantInput{
 		OrgID:                    testOrgID,
@@ -2900,6 +3023,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		DefaultMachineMemoryMB:   patch.NullableInt{Set: true, Value: &memory4096},
 		DefaultMachineEnvOverlay: &envOverlay,
 		MaxTotalCPU:              patch.NullableInt{Set: true},
+		DeleteAfterIdleMinutes:   patch.NullableInt{Set: true, Value: &deleteAfterIdleMinutes},
 	})
 	if err != nil {
 		t.Fatalf("update grant: %v", err)
@@ -2912,6 +3036,7 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		updated.MaxTotalCPU != nil ||
 		updated.MinMachineCPU == nil || *updated.MinMachineCPU != 0 ||
 		updated.MaxMachineCPU == nil || *updated.MaxMachineCPU != 4 ||
+		updated.DeleteAfterIdleMinutes == nil || *updated.DeleteAfterIdleMinutes != 30 ||
 		updated.MachinePoolID != machinePool.ID {
 		t.Fatalf("updated grant patch mismatch: %+v", updated)
 	}
@@ -2923,20 +3048,22 @@ func TestUpdateProjectMachinePoolGrantAppliesPatchSemantics(t *testing.T) {
 		t.Fatalf("get updated grant: %v", err)
 	}
 	if fetched.Description != "after" || fetched.MaxTotalCPU != nil ||
+		fetched.DeleteAfterIdleMinutes == nil || *fetched.DeleteAfterIdleMinutes != 30 ||
 		fetched.MinMachineCPU == nil || *fetched.MinMachineCPU != 0 {
 		t.Fatalf("fetched grant did not persist patch: %+v", fetched)
 	}
 	cleared, err := store.Execution().UpdateProjectMachinePoolGrant(ctx, executionstore.UpdateProjectMachinePoolGrantInput{
-		OrgID:         testOrgID,
-		ProjectID:     testProjectID,
-		ID:            grant.ID,
-		MinMachineCPU: patch.NullableInt{Set: true},
+		OrgID:                  testOrgID,
+		ProjectID:              testProjectID,
+		ID:                     grant.ID,
+		MinMachineCPU:          patch.NullableInt{Set: true},
+		DeleteAfterIdleMinutes: patch.NullableInt{Set: true},
 	})
 	if err != nil {
 		t.Fatalf("clear grant minimum: %v", err)
 	}
-	if cleared.MinMachineCPU != nil {
-		t.Fatalf("cleared grant minimum = %v, want nil", cleared.MinMachineCPU)
+	if cleared.MinMachineCPU != nil || cleared.DeleteAfterIdleMinutes != nil {
+		t.Fatalf("cleared grant overrides = %+v, want nil minimum and idle deletion policy", cleared)
 	}
 
 	two := 2

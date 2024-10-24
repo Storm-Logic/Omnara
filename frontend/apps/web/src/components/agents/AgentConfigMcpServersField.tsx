@@ -1,10 +1,11 @@
 import type { ToolPermissionProfile } from '@omnara/sdk'
-import { Trash2Icon } from 'lucide-react'
 
-import type { BasicMcpServer, McpAuthType } from '@/components/agents/agentConfigBasicSerialization'
 import { AgentConfigMcpSecretCombobox } from '@/components/agents/AgentConfigMcpSecretCombobox'
+import { AgentConfigSectionCard } from '@/components/agents/AgentConfigSectionCard'
+import type { BasicMcpServer, McpAuthType } from '@/components/agents/useAgentBuilderForm'
+import { PlusIcon, Trash2Icon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldLabel, RequiredFieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -18,6 +19,13 @@ const awsSigningFields = [
   { key: 'service', label: 'Signing service' },
   { key: 'region', label: 'Signing region' },
 ] as const
+
+const mcpAuthTypeOptions: { value: McpAuthType; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'oauth', label: 'OAuth secret' },
+  { value: 'bearer', label: 'Bearer secret' },
+  { value: 'sigv4', label: 'AWS Signature V4' },
+]
 
 function newMcpServer(permissionProfile: ToolPermissionProfile): BasicMcpServer {
   return {
@@ -51,43 +59,37 @@ export function AgentConfigMcpServersField({
   }
 
   return (
-    <Field>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <FieldLabel>MCP servers</FieldLabel>
-          <FieldDescription>Remote MCP servers the agent can call tools on.</FieldDescription>
-        </div>
+    <AgentConfigSectionCard
+      title="MCP servers"
+      action={
         <Button
           type="button"
-          size="sm"
-          variant="outline"
+          size="icon"
+          variant="ghost"
+          className="text-muted-foreground size-8"
           disabled={permissionProfile == null}
+          aria-label="Add server"
           onClick={() => {
             if (permissionProfile != null) {
               onServersChange([...servers, newMcpServer(permissionProfile)])
             }
           }}
         >
-          Add server
+          <PlusIcon />
         </Button>
-      </div>
-      <div className="space-y-3">
-        {servers.length === 0 ? (
-          <div className="border-border bg-background/60 text-muted-foreground flex min-h-16 items-center justify-center rounded-md border border-dashed px-4 text-sm">
-            No MCP servers
-          </div>
-        ) : (
-          servers.map((server) => {
+      }
+    >
+      {servers.length > 0 ? (
+        <div className="divide-y">
+          {servers.map((server) => {
             return (
-              <div
-                key={server.id}
-                className="border-border bg-background space-y-4 rounded-lg border p-4"
-              >
+              <div key={server.id} className="space-y-4 px-5 py-4">
                 <div className="grid gap-4 sm:grid-cols-[minmax(8rem,14rem)_1fr_auto]">
                   <Field>
-                    <FieldLabel htmlFor={`${server.id}-name`}>Name</FieldLabel>
+                    <RequiredFieldLabel htmlFor={`${server.id}-name`}>Name</RequiredFieldLabel>
                     <Input
                       id={`${server.id}-name`}
+                      required
                       value={server.name}
                       placeholder="github"
                       onChange={(event) => {
@@ -96,9 +98,10 @@ export function AgentConfigMcpServersField({
                     />
                   </Field>
                   <Field>
-                    <FieldLabel htmlFor={`${server.id}-url`}>URL</FieldLabel>
+                    <RequiredFieldLabel htmlFor={`${server.id}-url`}>URL</RequiredFieldLabel>
                     <Input
                       id={`${server.id}-url`}
+                      required
                       value={server.url}
                       placeholder="https://example.com/mcp"
                       onChange={(event) => {
@@ -124,7 +127,9 @@ export function AgentConfigMcpServersField({
                   <Field>
                     <FieldLabel>Tool permission</FieldLabel>
                     <Select
-                      value={server.permission.mode}
+                      value={
+                        server.permission?.mode ?? permissionProfile?.default_permission.mode ?? ''
+                      }
                       disabled={permissionProfile == null}
                       onValueChange={(mode) => {
                         updateServer(server.id, { permission: { mode, parameters: {} } })
@@ -132,7 +137,10 @@ export function AgentConfigMcpServersField({
                     >
                       <SelectTrigger className="w-full" aria-label="MCP tool permission">
                         <SelectValue>
-                          {permissionModeLabel(permissionProfile, server.permission.mode)}
+                          {permissionModeLabel(
+                            permissionProfile,
+                            server.permission?.mode ?? permissionProfile?.default_permission.mode,
+                          )}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
@@ -153,7 +161,9 @@ export function AgentConfigMcpServersField({
                       }}
                     >
                       <SelectTrigger className="w-full" aria-label="MCP default enable">
-                        <SelectValue />
+                        <SelectValue>
+                          {server.defaultEnabled ? 'Enabled by default' : 'Disabled by default'}
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="true">Enabled by default</SelectItem>
@@ -177,20 +187,28 @@ export function AgentConfigMcpServersField({
                       }}
                     >
                       <SelectTrigger className="w-full" aria-label="MCP auth type">
-                        <SelectValue />
+                        <SelectValue>
+                          {mcpAuthTypeOptions.find((option) => option.value === server.authType)
+                            ?.label ?? server.authType}
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="none">None</SelectItem>
-                        <SelectItem value="oauth">OAuth secret</SelectItem>
-                        <SelectItem value="bearer">Bearer secret</SelectItem>
-                        <SelectItem value="sigv4">AWS Signature V4</SelectItem>
+                        {mcpAuthTypeOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </Field>
                   {server.authType !== 'none' && (
                     <Field>
-                      <FieldLabel>Secret</FieldLabel>
+                      <RequiredFieldLabel htmlFor={`${server.id}-secret`}>
+                        Secret
+                      </RequiredFieldLabel>
                       <AgentConfigMcpSecretCombobox
+                        id={`${server.id}-secret`}
+                        required
                         orgId={orgId}
                         projectId={projectId}
                         server={server}
@@ -210,11 +228,12 @@ export function AgentConfigMcpServersField({
                   {server.authType === 'sigv4' &&
                     awsSigningFields.map((field) => (
                       <Field key={field.key}>
-                        <FieldLabel htmlFor={`${server.id}-aws-${field.key}`}>
+                        <RequiredFieldLabel htmlFor={`${server.id}-aws-${field.key}`}>
                           {field.label}
-                        </FieldLabel>
+                        </RequiredFieldLabel>
                         <Input
                           id={`${server.id}-aws-${field.key}`}
+                          required
                           value={server[field.key]}
                           onChange={(event) => {
                             updateServer(server.id, { [field.key]: event.target.value })
@@ -237,13 +256,13 @@ export function AgentConfigMcpServersField({
                 </Button>
               </div>
             )
-          })
-        )}
-      </div>
-    </Field>
+          })}
+        </div>
+      ) : null}
+    </AgentConfigSectionCard>
   )
 }
 
-function permissionModeLabel(profile: ToolPermissionProfile | undefined, value: string) {
-  return profile?.permission_modes.find((mode) => mode.name === value)?.label ?? value
+function permissionModeLabel(profile: ToolPermissionProfile | undefined, value?: string) {
+  return profile?.permission_modes.find((mode) => mode.name === value)?.label ?? value ?? ''
 }

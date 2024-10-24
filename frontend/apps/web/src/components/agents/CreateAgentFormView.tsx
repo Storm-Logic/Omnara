@@ -9,14 +9,12 @@ import { useNavigate } from '@tanstack/react-router'
 import { type SyntheticEvent, useReducer, useRef, useState } from 'react'
 
 import { AgentConfigBasicForm } from '@/components/agents/AgentConfigBasicForm'
+import { AgentConfigModelField } from '@/components/agents/AgentConfigModelField'
 import {
-  type BasicConfigDraft,
-  createEmptyBasicConfigDraft,
-  serializeBasicConfigDraft,
-} from '@/components/agents/agentConfigBasicSerialization'
-import {
+  type AgentConfigMode,
   agentConfigModeReducer,
   initialAgentConfigModeState,
+  yamlDiverged,
 } from '@/components/agents/agentConfigModeMachine'
 import { AgentConfigYamlField } from '@/components/agents/AgentConfigYamlField'
 import { AgentTemplateMenu } from '@/components/agents/AgentTemplateMenu'
@@ -24,16 +22,22 @@ import {
   type AgentTemplate,
   agentTemplateConfig,
   agentTemplateName,
+  defaultAgentTools,
 } from '@/components/agents/agentTemplates'
 import { ConfirmDiscardYamlDialog } from '@/components/agents/ConfirmDiscardYamlDialog'
 import { PillTabs } from '@/components/agents/PillTabs'
+import {
+  type BasicConfig,
+  createBasicConfigSession,
+  emptyBasicConfig,
+  useAgentBuilderForm,
+} from '@/components/agents/useAgentBuilderForm'
 import { PageBreadcrumb } from '@/components/layout/PageBreadcrumb'
 import { Button } from '@/components/ui/button'
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldGroup, RequiredFieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { Spinner } from '@/components/ui/spinner'
 import type { SubmitStatus } from '@/lib/submit-status'
-import { idle, statusError, submitError, submitting } from '@/lib/submit-status'
+import { idle, settleSubmission, statusError, submitError, submitting } from '@/lib/submit-status'
 import { useProjectPage } from '@/lib/use-project-page'
 import { cn } from '@/lib/utils'
 
@@ -41,7 +45,6 @@ type SubmitAction = 'profile' | 'launch'
 
 interface CreateAgentDraft {
   name: string
-  message: string
   status: SubmitStatus
 }
 
@@ -77,56 +80,67 @@ export function CreateAgentFormView({
   )
   const [draft, setDraft] = useState<CreateAgentDraft>(() => ({
     name: initialTemplate?.name ?? '',
-    message: '',
     status: idle,
   }))
-  const [configDraft, setConfigDraft] = useState<BasicConfigDraft>(() =>
-    initialTemplate
-      ? {
-          ...createEmptyBasicConfigDraft(),
-          ...agentTemplateConfig(initialTemplate, catalog, defaultPool, defaultModel),
-        }
-      : createEmptyBasicConfigDraft(),
-  )
-  const [appliedTemplate, setAppliedTemplate] = useState<AgentTemplate | null>(
-    initialTemplate ?? null,
-  )
   const [pendingAction, setPendingAction] = useState<SubmitAction | null>(null)
   const savedProfile = useRef<SavedProfile | null>(null)
+  const [session, setSession] = useState(() => createBasicConfigSession(''))
+  const form = useAgentBuilderForm(
+    session,
+    initialTemplate
+      ? templateBasicConfig(initialTemplate)
+      : { ...emptyBasicConfig, tools: defaultAgentTools(catalog) },
+  )
+  const switchMode = (nextMode: AgentConfigMode) => {
+    if (nextMode === 'builder' && mode.editorYaml !== null) {
+      const adopted = createBasicConfigSession(mode.editorYaml)
+      if (adopted.initialDraft != null) {
+        setSession(adopted)
+        form.reset(adopted.initialDraft)
+        dispatchMode({ type: 'adopt-yaml-edits' })
+        return
+      }
+    }
+    dispatchMode({ type: 'switch-mode', mode: nextMode })
+  }
+
+  function templateBasicConfig(template: AgentTemplate): BasicConfig {
+    return {
+      mcpServers: [],
+      skillIds: [],
+      ...agentTemplateConfig(template, catalog, defaultPool, defaultModel),
+    }
+  }
+
+  function applyTemplate(template: AgentTemplate) {
+    const next = templateBasicConfig(template)
+    // Keep a model the user already picked; templates only fill the gap.
+    if (form.model.providerConfig !== '' && form.model.modelName !== '') {
+      next.providerConfig = form.model.providerConfig
+      next.modelName = form.model.modelName
+    }
+    form.reset(next)
+    setDraft((prev) => ({ ...prev, name: agentTemplateName(prev.name, template) }))
+  }
 
   if (project == null) return null
 
-  function applyTemplate(template: AgentTemplate) {
-    setConfigDraft((prev) => {
-      const next = {
-        ...createEmptyBasicConfigDraft(),
-        ...agentTemplateConfig(template, catalog, defaultPool, defaultModel),
-      }
-      // Keep a model the user already picked; templates only fill the gap.
-      if (prev.providerConfig !== '' && prev.modelName !== '') {
-        next.providerConfig = prev.providerConfig
-        next.modelName = prev.modelName
-      }
-      return next
-    })
-    setDraft((prev) => ({ ...prev, name: agentTemplateName(prev.name, template) }))
-    setAppliedTemplate(template)
-  }
-
   const showBuilder = mode.mode === 'builder'
-  const builderYaml = serializeBasicConfigDraft(configDraft)
-  const editorYaml = mode.editorYaml ?? builderYaml
-  const yaml = showBuilder ? builderYaml : editorYaml
   const isSubmitting = draft.status.phase === 'submitting'
   const errorMessage = statusError(draft.status)
-  const canSubmit = !isSubmitting && draft.name.trim() !== '' && yaml.trim() !== ''
+  const yaml = mode.editorYaml ?? form.yaml
+  const canSubmit =
+    !isSubmitting &&
+    draft.name.trim() !== '' &&
+    yaml.trim() !== '' &&
+    !(form.blocked && (showBuilder || !yamlDiverged(mode)))
 
   async function submit(action: SubmitAction) {
     if (!canSubmit) return
     setDraft((prev) => ({ ...prev, status: submitting }))
     setPendingAction(action)
     const name = draft.name.trim()
-    try {
+    const result = await settleSubmission(async () => {
       let profile = savedProfile.current
       if (profile?.name !== name || profile.yaml !== yaml) {
         const config = await createAgentConfig.mutateAsync({ source: yaml, source_format: 'yaml' })
@@ -147,7 +161,6 @@ export function CreateAgentFormView({
         const launch = await createAgent.mutateAsync({
           profile: profile.profileId,
           config: profile.configId,
-          message: draft.message.trim() === '' ? undefined : draft.message,
         })
         await navigate({
           to: '/projects/$projectId/agents/$agentId',
@@ -159,100 +172,113 @@ export function CreateAgentFormView({
           params: { projectId, profileId: profile.profileId },
         })
       }
+    }).finally(() => {
+      setPendingAction(null)
+    })
+
+    if (result.ok) {
       setDraft((prev) => ({ ...prev, status: idle }))
-    } catch (err) {
+    } else {
+      const status = submitError(
+        result.error,
+        action === 'launch' ? 'Could not create agent' : 'Could not create profile',
+      )
       setDraft((prev) => ({
         ...prev,
-        status: submitError(
-          err,
-          action === 'launch' ? 'Could not create agent' : 'Could not create profile',
-        ),
+        status,
       }))
-    } finally {
-      setPendingAction(null)
     }
   }
 
   return (
     <form
-      className="mx-auto flex w-full max-w-6xl flex-col gap-6"
+      noValidate
+      className="flex h-full w-full flex-col"
       onSubmit={(event: SyntheticEvent<HTMLFormElement>) => {
         event.preventDefault()
         void submit('launch')
       }}
     >
-      <PageBreadcrumb
-        items={[
-          { label: activeOrg.name, to: '/' },
-          { label: project.name },
-          { label: 'Agents', to: '/projects/$projectId/agents', params: { projectId } },
-          { label: 'New agent' },
-        ]}
-      />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-2xl font-bold tracking-tight">New agent</h1>
-        <div className="flex items-center gap-2">
-          {showBuilder && <AgentTemplateMenu disabled={!templatesReady} onApply={applyTemplate} />}
-          <PillTabs
-            value={mode.mode}
-            onValueChange={(nextMode) => {
-              dispatchMode({ type: 'switch-mode', mode: nextMode })
-            }}
-            tabs={[
-              { value: 'builder', label: 'Builder' },
-              { value: 'yaml', label: 'YAML' },
+      {/* Negative margins offset the scroll container's p-6 so the scroll region and the pinned bar reach the pane edges. */}
+      <div className="-mx-6 -mt-6 min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-6">
+        <div className="flex min-h-full w-full flex-col gap-6 pb-6">
+          <PageBreadcrumb
+            items={[
+              { id: 'organization', label: activeOrg.name, to: '/' },
+              { id: 'project', label: project.name },
+              {
+                id: 'agents',
+                label: 'Agents',
+                to: '/projects/$projectId/agents',
+                params: { projectId },
+              },
+              { id: 'new-agent', label: 'New agent' },
             ]}
           />
+          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center justify-between gap-2">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">New agent</h1>
+              <p className="text-muted-foreground mt-0.5 text-sm">
+                Define a reusable agent profile for this project.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {showBuilder && (
+                <AgentTemplateMenu disabled={!templatesReady} onApply={applyTemplate} />
+              )}
+              <PillTabs
+                value={mode.mode}
+                onValueChange={switchMode}
+                tabs={[
+                  { value: 'builder', label: 'Builder' },
+                  { value: 'yaml', label: 'YAML' },
+                ]}
+              />
+            </div>
+          </div>
+
+          <FieldGroup className="mx-auto w-full max-w-3xl flex-1 gap-8">
+            <div className={cn(showBuilder && 'grid gap-6 sm:grid-cols-2')}>
+              <Field>
+                <RequiredFieldLabel htmlFor="agent-config-name">Name</RequiredFieldLabel>
+                <Input
+                  id="agent-config-name"
+                  required
+                  value={draft.name}
+                  placeholder="Demo research agent"
+                  className={cn(!showBuilder && 'max-w-md')}
+                  onChange={(event) => {
+                    setDraft((prev) => ({ ...prev, name: event.target.value }))
+                  }}
+                />
+              </Field>
+              {showBuilder && (
+                <AgentConfigModelField
+                  orgId={activeOrg.id}
+                  projectId={projectId}
+                  value={form.model}
+                  onChange={form.setModel}
+                  onUnavailableChange={form.reportModelUnavailable}
+                />
+              )}
+            </div>
+            <div className={cn('flex flex-col gap-8', !showBuilder && 'hidden')}>
+              <AgentConfigBasicForm orgId={activeOrg.id} projectId={projectId} form={form} />
+            </div>
+            {!showBuilder && (
+              <AgentConfigYamlField
+                id="agent-yaml"
+                value={yaml}
+                className="h-auto min-h-[24rem] flex-1"
+                onChange={(value) => {
+                  dispatchMode({ type: 'editor-yaml-changed', yaml: value, builderYaml: form.yaml })
+                }}
+              />
+            )}
+          </FieldGroup>
         </div>
       </div>
-
-      <FieldGroup className="max-w-3xl gap-8">
-        <Field>
-          <FieldLabel htmlFor="agent-config-name">Name</FieldLabel>
-          <Input
-            id="agent-config-name"
-            required
-            value={draft.name}
-            placeholder="Demo research agent"
-            className="max-w-md"
-            onChange={(event) => {
-              setDraft((prev) => ({ ...prev, name: event.target.value }))
-            }}
-          />
-        </Field>
-        <div className={cn('flex flex-col gap-8', !showBuilder && 'hidden')}>
-          <AgentConfigBasicForm
-            orgId={activeOrg.id}
-            projectId={projectId}
-            value={configDraft}
-            onChange={setConfigDraft}
-          />
-        </div>
-        {!showBuilder && (
-          <AgentConfigYamlField
-            id="agent-yaml"
-            value={editorYaml}
-            className="h-[28rem]"
-            onChange={(value) => {
-              dispatchMode({ type: 'editor-yaml-changed', yaml: value, builderYaml })
-            }}
-          />
-        )}
-        <Field>
-          <FieldLabel htmlFor="agent-message">First message (optional)</FieldLabel>
-          <Input
-            id="agent-message"
-            value={draft.message}
-            placeholder={
-              appliedTemplate?.firstMessagePlaceholder ?? 'Kick the agent off with a message'
-            }
-            onChange={(event) => {
-              setDraft((prev) => ({ ...prev, message: event.target.value }))
-            }}
-          />
-        </Field>
-      </FieldGroup>
-      <div className="bg-background sticky -bottom-6 z-10 -mb-6 flex items-center justify-between gap-4 border-t py-4">
+      <div className="bg-sidebar -mx-6 -mb-6 flex items-center justify-between gap-4 border-t px-8 py-3.5">
         <Button
           type="button"
           variant="ghost"
@@ -271,15 +297,14 @@ export function CreateAgentFormView({
             type="button"
             variant="outline"
             disabled={!canSubmit}
+            loading={pendingAction === 'profile'}
             onClick={() => {
               void submit('profile')
             }}
           >
-            {pendingAction === 'profile' && <Spinner />}
             Create profile
           </Button>
-          <Button type="submit" disabled={!canSubmit}>
-            {pendingAction === 'launch' && <Spinner />}
+          <Button type="submit" disabled={!canSubmit} loading={pendingAction === 'launch'}>
             Create & launch agent
           </Button>
         </div>

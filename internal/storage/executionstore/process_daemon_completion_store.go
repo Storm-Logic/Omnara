@@ -68,6 +68,7 @@ func (s *Store) MarkProcessStarted(
 			input.AgentID,
 			input.Authority,
 			input.ID,
+			false,
 		)
 		if err != nil {
 			return DaemonProcessReportApplication{}, err
@@ -260,6 +261,7 @@ func (s *Store) CompleteDaemonProcess(
 			ExitSignal:         input.ExitSignal,
 			StateReasonCode:    sqlcTextFromEmpty(input.StateReasonCode),
 			StateReasonMessage: input.StateReasonMessage,
+			StorageExhausted:   input.StorageExhausted,
 		},
 	)
 	processUpdated := err == nil
@@ -272,6 +274,7 @@ func (s *Store) CompleteDaemonProcess(
 			input.AgentID,
 			input.Authority,
 			input.ID,
+			input.StorageExhausted,
 		)
 		if err != nil {
 			return DaemonProcessReportApplication{}, err
@@ -399,7 +402,19 @@ func (s *Store) CompleteDaemonProcess(
 			)
 		}
 	}
-	if processUpdated {
+	if input.StorageExhausted {
+		if err := completeUnresolvedProcessActionsForClosedProcessTx(
+			ctx,
+			txNotifications,
+			tx,
+			qtx,
+			record.OrgID,
+			record.ID,
+			daemonprotocol.ProcessReasonMachineStorageExhausted,
+		); err != nil {
+			return DaemonProcessReportApplication{}, err
+		}
+	} else if processUpdated {
 		if err := completeQueuedProcessActionsForTerminalProcessTx(
 			ctx,
 			txNotifications,
@@ -425,6 +440,7 @@ func daemonProcessForReportTx(
 	projectID, agentID ID,
 	authority DaemonRuntimeAuthority,
 	processID ID,
+	allowUngranted bool,
 ) (ProcessRecord, error) {
 	row, err := qtx.GetDaemonProcessForProjectReport(
 		ctx,
@@ -444,7 +460,7 @@ func daemonProcessForReportTx(
 	if record.AgentID != agentID {
 		return ProcessRecord{}, storeerr.ErrDaemonRuntimeUnregistered
 	}
-	if record.ExecutionGrantedAt == nil {
+	if record.ExecutionGrantedAt == nil && !allowUngranted {
 		return ProcessRecord{}, storeerr.ErrProcessExecutionNotGranted
 	}
 	return record, nil
@@ -460,7 +476,8 @@ func daemonTerminalReportMatchesRecord(
 		record.StateReasonCode == input.StateReasonCode &&
 		record.StateReasonMessage == input.StateReasonMessage &&
 		matchesProvidedSourceTime(record.SourceStartedAt, input.SourceStartedAt) &&
-		matchesTerminalSourceTime(record.SourceEndedAt, input.SourceEndedAt)
+		(input.StorageExhausted ||
+			matchesTerminalSourceTime(record.SourceEndedAt, input.SourceEndedAt))
 }
 
 func matchesProvidedSourceTime(stored *time.Time, provided time.Time) bool {
@@ -485,31 +502,21 @@ func (s *Store) GetProcessByToolCall(
 	return getProcessByToolCallTx(ctx, s.pool, projectID, agentID, toolCallID)
 }
 
-func (s *Store) ListActiveProcessesForContext(
-	ctx context.Context,
-	projectID, agentID ID,
-) ([]ActiveProcessRecord, error) {
-	if isNilID(projectID) || isNilID(agentID) {
-		return nil, errors.New("project and agent are required")
-	}
-	return listActiveProcessesForContext(ctx, s.q, projectID, agentID)
-}
-
-func (r *ToolCallReader) ListActiveProcessesForContext(
+func (r *ToolCallReader) ListActiveProcesses(
 	ctx context.Context,
 ) ([]ActiveProcessRecord, error) {
 	t := r.transaction
-	return listActiveProcessesForContext(ctx, t.q, t.input.ProjectID, t.input.AgentID)
+	return listActiveProcesses(ctx, t.q, t.input.ProjectID, t.input.AgentID)
 }
 
-func listActiveProcessesForContext(
+func listActiveProcesses(
 	ctx context.Context,
 	q *dbsqlc.Queries,
 	projectID, agentID ID,
 ) ([]ActiveProcessRecord, error) {
-	rows, err := q.ListActiveProcessesForContext(
+	rows, err := q.ListActiveProcesses(
 		ctx,
-		dbsqlc.ListActiveProcessesForContextParams{ProjectID: projectID, AgentID: agentID},
+		dbsqlc.ListActiveProcessesParams{ProjectID: projectID, AgentID: agentID},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list active processes: %w", err)

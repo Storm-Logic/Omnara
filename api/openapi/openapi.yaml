@@ -267,10 +267,10 @@ paths:
       summary: Create organization
       description: |
         Creates the organization and its local default resources atomically.
-        When supplied, the idempotency key determines the proposed organization
-        ID. Reusing it after a completed request returns the existing
-        organization without another hosted call. A failed retry uses the same
-        proposed ID. Without a key, each request is a fresh attempt.
+        An idempotency key determines the proposed organization ID; replaying it
+        returns the existing organization. Without a key, each request is a fresh
+        attempt. Optional default-provider provisioning begins after commit and
+        retries asynchronously without failing organization creation.
       security:
         - bearerAuth: []
         - browserSessionCookie: []
@@ -1738,6 +1738,7 @@ paths:
         - $ref: '#/components/parameters/SecretKindFilter'
         - $ref: '#/components/parameters/SecretOwnerKindFilter'
         - $ref: '#/components/parameters/SecretOwnerProjectIDFilter'
+        - $ref: '#/components/parameters/SecretMCPOAuthFlowIDFilter'
         - $ref: '#/components/parameters/SecretMetadataFilter'
         - name: sort
           in: query
@@ -2119,6 +2120,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/ResourceNameFilter'
         - $ref: '#/components/parameters/IntegrationInstallAgentProfileFilter'
+        - $ref: '#/components/parameters/IntegrationInstallOAuthFlowIDFilter'
         - name: sort
           in: query
           schema:
@@ -2461,15 +2463,53 @@ paths:
           $ref: '#/components/responses/ClientError'
         '5XX':
           $ref: '#/components/responses/ServerError'
+    patch:
+      operationId: renameAgentProfile
+      tags: [Configs and Profiles]
+      summary: Rename agent profile
+      security:
+        - bearerAuth: []
+        - browserSessionCookie: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenameAgentProfileRequest'
+      responses:
+        '200':
+          description: Agent profile renamed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
     delete:
       operationId: deleteAgentProfile
       tags: [Configs and Profiles]
       summary: Delete agent profile
       description: >-
-        Deletes the profile and all of its profile versions. Agents launched from the profile are
-        retained and keep running: each agent holds an immutable snapshot of the configuration it was
-        launched with, so its reference to the profile becomes historical provenance only. Deletion is
-        blocked while an active integration install references the profile.
+        Deletes the profile, all of its profile versions, and any cron triggers targeting the
+        profile. Agents launched from the profile are retained and keep running: each agent holds an
+        immutable snapshot of the configuration it was launched with, so its reference to the profile
+        becomes historical provenance only. Deletion is blocked while an active integration install
+        references the profile.
       security:
         - bearerAuth: []
         - browserSessionCookie: []
@@ -2666,6 +2706,225 @@ paths:
           $ref: '#/components/responses/ClientError'
         '5XX':
           $ref: '#/components/responses/ServerError'
+  /api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^org_[a-z2-7]{26}$'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^proj_[a-z2-7]{26}$'
+    post:
+      operationId: createCronTrigger
+      tags: [Configs and Profiles]
+      summary: Create cron trigger
+      description: >-
+        Creates a cron trigger that fires on a schedule. A trigger targeting an agent profile
+        launches a new agent from the profile's current config on each firing; a trigger targeting
+        an agent sends an input to that agent. Missed firings are coalesced, matching standard
+        cron behavior: if one or more scheduled times pass while firing is delayed, the trigger
+        fires once for the oldest missed time and then resumes its schedule from the current time,
+        without retroactively firing for the other missed times.
+      security:
+        - bearerAuth: []
+        - browserSessionCookie: []
+          csrfHeader: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCronTriggerRequest'
+      responses:
+        '200':
+          description: Existing cron trigger returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CronTrigger'
+        '201':
+          description: Cron trigger created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CronTrigger'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+    get:
+      operationId: listCronTriggers
+      tags: [Configs and Profiles]
+      summary: List cron triggers
+      description: Items are ordered by created_at descending, then id descending.
+      parameters:
+        - $ref: '#/components/parameters/ResourceNameFilter'
+        - name: agent_id
+          in: query
+          description: Only return triggers targeting this agent.
+          schema:
+            $ref: '#/components/schemas/AgentID'
+        - name: agent_profile_id
+          in: query
+          description: Only return triggers targeting this agent profile.
+          schema:
+            $ref: '#/components/schemas/AgentProfileID'
+        - name: sort
+          in: query
+          schema:
+            $ref: '#/components/schemas/ResourceListSort'
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: Cron triggers in the project, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListCronTriggersResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+  /api/v1/orgs/{orgID}/projects/{projectID}/cron-triggers/{cronTriggerID}:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^org_[a-z2-7]{26}$'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^proj_[a-z2-7]{26}$'
+      - name: cronTriggerID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/CronTriggerID'
+    get:
+      operationId: getCronTrigger
+      tags: [Configs and Profiles]
+      summary: Get cron trigger
+      responses:
+        '200':
+          description: Cron trigger.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CronTrigger'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+    patch:
+      operationId: updateCronTrigger
+      tags: [Configs and Profiles]
+      summary: Update cron trigger
+      description: >-
+        Updates the schedule, message template, or enabled state. The target is immutable; delete
+        the trigger and create a new one to retarget.
+      security:
+        - bearerAuth: []
+        - browserSessionCookie: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCronTriggerRequest'
+      responses:
+        '200':
+          description: Cron trigger updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CronTrigger'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+    delete:
+      operationId: deleteCronTrigger
+      tags: [Configs and Profiles]
+      summary: Delete cron trigger
+      security:
+        - bearerAuth: []
+        - browserSessionCookie: []
+          csrfHeader: []
+      responses:
+        '204':
+          description: Resource deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
   /api/v1/orgs/{orgID}/projects/{projectID}/agents:
     parameters:
       - name: orgID
@@ -2703,7 +2962,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GetAgentResponse'
+                $ref: '#/components/schemas/CurrentAgentResponse'
         '201':
           description: Agent launched.
           content:
@@ -2842,9 +3101,9 @@ paths:
       summary: Archive agent
       description: >-
         Archives the agent: requests cancellation of its active runtime, cancels queued inputs and
-        affected processes, removes its pending wakeup, releases explicit machine bindings, and deletes
-        pooled machines created for the agent. The agent and its full event history stay readable by
-        id; archived agents leave listings. The agent's profile and configuration are retained, as are
+        affected processes, removes its pending wakeup, releases explicit machine bindings, deletes
+        pooled machines created for the agent, and deletes cron triggers targeting the agent. The
+        agent and its full event history stay readable by id; archived agents leave listings. The agent's profile and configuration are retained, as are
         explicitly attached BYO machines. Archiving an already-archived agent is a no-op that returns
         the agent unchanged.
       security:
@@ -2857,7 +3116,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GetAgentResponse'
+                $ref: '#/components/schemas/CurrentAgentResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2907,7 +3166,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateAgentConfigRequest'
+              $ref: '#/components/schemas/UpdateAgentConfigRequest'
       responses:
         '200':
           description: Agent config updated.
@@ -5039,7 +5298,7 @@ paths:
       summary: Delete configured model
       description: >-
         Deletes only the configured model. Deletion is blocked while it has active project grants.
-        Models belonging to a cluster-managed provider config cannot be deleted through this route.
+        Cluster-managed configured models cannot be deleted through this route.
       security:
         - bearerAuth: []
         - browserSessionCookie: []
@@ -5383,6 +5642,11 @@ paths:
       operationId: updateMachinePool
       tags: [Machine Pools]
       summary: Update machine pool
+      description: >-
+        Tenant-managed pools support every request field. Cluster-managed pools only allow changes to
+        default CPU and memory, environment and secret environment variables, provider-supported
+        per-machine CPU and memory limits, and the idle deletion policy. Other cluster-managed changes
+        are rejected with 409 Conflict.
       security:
         - bearerAuth: []
         - browserSessionCookie: []
@@ -6140,6 +6404,13 @@ components:
       schema:
         $ref: '#/components/schemas/ProjectID'
       description: Required with owner_kind=project and invalid with other owner kinds.
+    SecretMCPOAuthFlowIDFilter:
+      name: mcp_oauth_flow_id
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/MCPOAuthFlowID'
+      description: Filter to secrets that have a version created by this MCP OAuth flow.
     IntegrationInstallAgentProfileFilter:
       name: agent_profile_id
       in: query
@@ -6147,6 +6418,13 @@ components:
       schema:
         $ref: '#/components/schemas/AgentProfileID'
       description: Only return integration installs bound to this agent profile.
+    IntegrationInstallOAuthFlowIDFilter:
+      name: oauth_flow_id
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/IntegrationOAuthFlowID'
+      description: Only return the integration install completed by this OAuth setup flow.
     SecretAvailabilitySourceFilter:
       name: availability_source
       in: query
@@ -6289,6 +6567,19 @@ components:
             - validation_failed
             - csrf_check_failed
             - authentication_unavailable
+    Warning:
+      type: object
+      additionalProperties: false
+      required: [message, code]
+      properties:
+        message:
+          type: string
+          description: Human-readable warning message. Do not match on it programmatically.
+        code:
+          type: string
+          description: Stable warning code for programmatic handling.
+          enum:
+            - missing_recommended_machine_tools
     ClientErrorCode:
       type: string
       description: Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
@@ -6320,7 +6611,10 @@ components:
         - authentication_unavailable
     ManagementKind:
       type: string
-      description: Lifecycle owner. Tenant-managed resources can be changed through tenant APIs; cluster-managed resources are installed by the control plane and are read-only through tenant lifecycle APIs.
+      description: >-
+        Lifecycle owner. Tenant-managed resources can be changed through tenant APIs. Cluster-managed
+        resources are installed and lifecycle-managed by the control plane; individual APIs may explicitly
+        expose tenant-editable settings.
       enum: [tenant, cluster]
     OrganizationID:
       type: string
@@ -6337,6 +6631,12 @@ components:
     ProjectID:
       type: string
       pattern: '^proj_[a-z2-7]{26}$'
+    MCPOAuthFlowID:
+      type: string
+      pattern: '^moaf_[a-z2-7]{26}$'
+    IntegrationOAuthFlowID:
+      type: string
+      pattern: '^ioaf_[a-z2-7]{26}$'
     ActorID:
       type: string
       pattern: '^actr_[a-z2-7]{26}$'
@@ -6349,6 +6649,9 @@ components:
     AgentProfileID:
       type: string
       pattern: '^aprf_[a-z2-7]{26}$'
+    CronTriggerID:
+      type: string
+      pattern: '^cron_[a-z2-7]{26}$'
     IntegrationInstallID:
       type: string
       pattern: '^iin_[a-z2-7]{26}$'
@@ -6417,8 +6720,9 @@ components:
         does not expose as typed fields, such as OpenRouter `provider` routing
         or sampling parameters. Omnara still controls the fields it needs to run
         the agent correctly, including the model, prompt/messages, streaming,
-        tools, and selected reasoning policy. For OpenRouter routing options,
-        see
+        tools, output-token limit, and selected reasoning policy. Provider
+        passthrough values for those fields are ignored. For OpenRouter routing
+        options, see
         https://openrouter.ai/docs/guides/routing/provider-selection and general
         request parameters at https://openrouter.ai/docs/api/reference/parameters.
       additionalProperties: true
@@ -6723,7 +7027,7 @@ components:
     ConfiguredModel:
       type: object
       additionalProperties: false
-      required: [id, org_id, model_provider_config_id, name, current_revision_id, provider_model_slug, context_window_tokens, max_output_tokens, default_cache_retention, supports_tools, supports_reasoning, default_reasoning_effort, supported_reasoning_efforts, input_modalities, output_modalities, api_variant_options, created_at, updated_at, revision_created_at]
+      required: [id, org_id, model_provider_config_id, management_kind, name, current_revision_id, provider_model_slug, context_window_tokens, max_output_tokens, default_cache_retention, supports_tools, supports_reasoning, default_reasoning_effort, supported_reasoning_efforts, input_modalities, output_modalities, api_variant_options, created_at, updated_at, revision_created_at]
       properties:
         id:
           $ref: '#/components/schemas/ConfiguredModelID'
@@ -6731,6 +7035,8 @@ components:
           $ref: '#/components/schemas/OrganizationID'
         model_provider_config_id:
           $ref: '#/components/schemas/ModelProviderConfigID'
+        management_kind:
+          $ref: '#/components/schemas/ManagementKind'
         name:
           type: string
           description: Admin-facing configured model name used by agent YAML as model.name.
@@ -7299,8 +7605,10 @@ components:
     MCPOAuthStartResponse:
       type: object
       additionalProperties: false
-      required: [authorization_url, expires_at]
+      required: [flow_id, authorization_url, expires_at]
       properties:
+        flow_id:
+          $ref: '#/components/schemas/MCPOAuthFlowID'
         authorization_url:
           type: string
           format: uri
@@ -7378,10 +7686,12 @@ components:
     IntegrationOAuthSetup:
       type: object
       additionalProperties: false
-      required: [provider, oauth_url, redirect_uri, events_url, actions_url, expires_at]
+      required: [provider, flow_id, oauth_url, redirect_uri, events_url, actions_url, expires_at]
       properties:
         provider:
           type: string
+        flow_id:
+          $ref: '#/components/schemas/IntegrationOAuthFlowID'
         oauth_url:
           type: string
           format: uri
@@ -7425,10 +7735,12 @@ components:
     SlackSetup:
       type: object
       additionalProperties: false
-      required: [provider, slack_app_id, oauth_url, redirect_uri, events_url, actions_url, expires_at]
+      required: [provider, flow_id, slack_app_id, oauth_url, redirect_uri, events_url, actions_url, expires_at]
       properties:
         provider:
           type: string
+        flow_id:
+          $ref: '#/components/schemas/IntegrationOAuthFlowID'
         slack_app_id:
           type: string
         oauth_url:
@@ -7456,6 +7768,24 @@ components:
         source_format:
           type: string
           enum: [yaml, json]
+    UpdateAgentConfigRequest:
+      description: >-
+        Replaces a live agent's config. expected_current_config_id makes the
+        change conditional on the agent still running that config, so
+        concurrent editors get a conflict instead of silently overwriting each
+        other.
+      type: object
+      additionalProperties: false
+      required: [source, source_format]
+      properties:
+        source:
+          type: string
+          minLength: 1
+        source_format:
+          type: string
+          enum: [yaml, json]
+        expected_current_config_id:
+          $ref: '#/components/schemas/AgentConfigID'
     ToolPermissionSelection:
       type: object
       additionalProperties: false
@@ -7593,6 +7923,13 @@ components:
           $ref: '#/components/schemas/AgentConfigModel'
         instruction_hash:
           type: string
+        warnings:
+          type: array
+          minItems: 1
+          x-go-type-skip-optional-pointer: true
+          description: Non-blocking diagnostics about the agent config.
+          items:
+            $ref: '#/components/schemas/Warning'
         created_at:
           $ref: '#/components/schemas/Timestamp'
     CreateAgentProfileRequest:
@@ -7613,6 +7950,13 @@ components:
           $ref: '#/components/schemas/AgentConfigID'
         expected_current_config_id:
           $ref: '#/components/schemas/AgentConfigID'
+    RenameAgentProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
     AgentProfile:
       type: object
       additionalProperties: false
@@ -7646,6 +7990,157 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AgentProfile'
+        next_cursor:
+          type: [string, "null"]
+          description: Opaque cursor for the next page, or null when this is the last page.
+    AgentCronTriggerTarget:
+      type: object
+      additionalProperties: false
+      required: [type, agent_id]
+      properties:
+        type:
+          type: string
+          enum: [agent]
+        agent_id:
+          $ref: '#/components/schemas/AgentID'
+    AgentProfileCronTriggerTarget:
+      type: object
+      additionalProperties: false
+      required: [type, agent_profile_id]
+      properties:
+        type:
+          type: string
+          enum: [profile]
+        agent_profile_id:
+          $ref: '#/components/schemas/AgentProfileID'
+    CronTriggerTarget:
+      oneOf:
+        - $ref: '#/components/schemas/AgentCronTriggerTarget'
+        - $ref: '#/components/schemas/AgentProfileCronTriggerTarget'
+      discriminator:
+        propertyName: type
+        mapping:
+          agent: '#/components/schemas/AgentCronTriggerTarget'
+          profile: '#/components/schemas/AgentProfileCronTriggerTarget'
+    CronExpression:
+      type: string
+      description: >-
+        Standard five-field cron expression (minute, hour, day of month, month, day of week).
+        `TZ=`/`CRON_TZ=` prefixes are rejected; set the `timezone` field instead.
+      minLength: 9
+      maxLength: 256
+    CronTimezone:
+      type: string
+      description: IANA time zone the schedule is evaluated in.
+      default: UTC
+      maxLength: 64
+    CronMessageTemplate:
+      type: string
+      description: >-
+        Go text/template rendered on each firing to produce the message sent to the target. The
+        template receives a `trigger` value with `name`, `fired_at`, and `last_fired_at` fields.
+        Rendering is capped at 64 KiB of output and one second of wall-clock time, and `printf`
+        width and precision specifiers are capped at 1024; a firing whose template fails to
+        render is recorded in `failure_report` without sending a message.
+      maxLength: 65536
+    CronTriggerFailureReport:
+      type: object
+      additionalProperties: false
+      required: [message, will_retry, failed_at]
+      properties:
+        message:
+          type: string
+          description: Why the most recent failed firing did not deliver a message.
+        will_retry:
+          type: boolean
+          description: Whether the firing will be retried after the claim lease expires.
+        failed_at:
+          $ref: '#/components/schemas/Timestamp'
+    CreateCronTriggerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, target, cron, message_template]
+      properties:
+        name:
+          type: string
+        target:
+          $ref: '#/components/schemas/CronTriggerTarget'
+        cron:
+          $ref: '#/components/schemas/CronExpression'
+        timezone:
+          $ref: '#/components/schemas/CronTimezone'
+        message_template:
+          $ref: '#/components/schemas/CronMessageTemplate'
+        enabled:
+          type: boolean
+          default: true
+    UpdateCronTriggerRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        cron:
+          $ref: '#/components/schemas/CronExpression'
+        timezone:
+          $ref: '#/components/schemas/CronTimezone'
+        message_template:
+          $ref: '#/components/schemas/CronMessageTemplate'
+        enabled:
+          type: boolean
+    CronTrigger:
+      type: object
+      additionalProperties: false
+      required: [id, org_id, project_id, name, target, cron, timezone, message_template, enabled, last_fired_at, next_fire_at, failure_report, created_at, updated_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/CronTriggerID'
+        org_id:
+          $ref: '#/components/schemas/OrganizationID'
+        project_id:
+          $ref: '#/components/schemas/ProjectID'
+        name:
+          type: string
+        target:
+          $ref: '#/components/schemas/CronTriggerTarget'
+        cron:
+          $ref: '#/components/schemas/CronExpression'
+        timezone:
+          $ref: '#/components/schemas/CronTimezone'
+        message_template:
+          $ref: '#/components/schemas/CronMessageTemplate'
+        enabled:
+          type: boolean
+        last_fired_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: "null"
+          description: When the trigger last fired, or null if it has never fired.
+        next_fire_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: "null"
+          description: Next scheduled firing, or null while the trigger is disabled.
+        failure_report:
+          oneOf:
+            - $ref: '#/components/schemas/CronTriggerFailureReport'
+            - type: "null"
+          description: >-
+            Most recent failed firing, or null if no firing has failed since the last
+            successful firing.
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+    ListCronTriggersResponse:
+      type: object
+      additionalProperties: false
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CronTrigger'
         next_cursor:
           type: [string, "null"]
           description: Opaque cursor for the next page, or null when this is the last page.
@@ -7718,13 +8213,50 @@ components:
         provider_uri:
           type: string
           format: uri
-    GetAgentResponse:
+    AgentMCPConnection:
+      type: object
+      additionalProperties: false
+      required: [server_key, endpoint_url, state, initialize_error, created_at, updated_at]
+      properties:
+        server_key:
+          type: string
+        endpoint_url:
+          type: string
+        state:
+          type: string
+          enum: [initializing, ready, failed, expired]
+        protocol_version:
+          type: string
+        initialize_error:
+          type: string
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+    CurrentAgentResponse:
       type: object
       additionalProperties: false
       required: [agent]
       properties:
         agent:
           $ref: '#/components/schemas/Agent'
+    GetAgentResponse:
+      type: object
+      additionalProperties: false
+      required: [agent, machine_ids, mcp_connections]
+      properties:
+        agent:
+          $ref: '#/components/schemas/Agent'
+        machine_ids:
+          description: Machines currently attached to the agent, in binding creation order.
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineID'
+        mcp_connections:
+          description: The agent's MCP server connections, ordered by server key.
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentMCPConnection'
     ListAgentsResponse:
       type: object
       additionalProperties: false
@@ -8046,6 +8578,29 @@ components:
         created_at:
           $ref: '#/components/schemas/Timestamp'
         updated_at:
+          $ref: '#/components/schemas/Timestamp'
+    MachineFailureReport:
+      description: >-
+        The machine's most recent daemon-reported failure. A single slot,
+        overwritten by newer reports and cleared when the daemon recovers.
+      type: object
+      additionalProperties: false
+      required: [stage, output_tail, output_truncated, reported_at]
+      properties:
+        stage:
+          type: string
+          enum: [startup_script, daemon_install, daemon_update, daemon_uninstall, daemon_uninstalled]
+        exit_status:
+          type: integer
+        output_tail:
+          type: string
+        output_truncated:
+          type: boolean
+        daemon_version:
+          type: string
+        target_version:
+          type: string
+        reported_at:
           $ref: '#/components/schemas/Timestamp'
     LaunchAgentResponse:
       type: object
@@ -9386,12 +9941,14 @@ components:
     OrgInvitation:
       type: object
       additionalProperties: false
-      required: [id, org_id, email, org_role, created_at]
+      required: [id, org_id, org_name, email, org_role, created_at]
       properties:
         id:
           $ref: '#/components/schemas/OrgInvitationID'
         org_id:
           $ref: '#/components/schemas/OrganizationID'
+        org_name:
+          type: string
         email:
           type: string
           format: email
@@ -9716,6 +10273,12 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine from this pool. Omit to leave the pool default unset; a grant or agent source may still override it.
+          type: integer
+          format: int32
+          minimum: 5
+          maximum: 2147483647
         metadata:
           $ref: '#/components/schemas/MachineMetadata'
     UpdateMachinePoolRequest:
@@ -9795,12 +10358,18 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine from this pool. Null clears the pool default; omitted leaves it unchanged.
+          type: [integer, "null"]
+          format: int32
+          minimum: 5
+          maximum: 2147483647
         metadata:
           $ref: '#/components/schemas/MachineMetadata'
     MachinePool:
       type: object
       additionalProperties: false
-      required: [id, org_id, name, management_kind, description, provider, default_machine_cpu, default_machine_memory_mb, default_machine_env, default_machine_secret_env, default_machine_provider_options, default_cwd, provider_config, runtime_protection_enabled, max_total_machines, max_total_cpu, max_total_memory_mb, min_machine_cpu, min_machine_memory_mb, max_machine_cpu, max_machine_memory_mb, metadata, created_at, updated_at]
+      required: [id, org_id, name, management_kind, description, provider, default_machine_cpu, default_machine_memory_mb, default_machine_env, default_machine_secret_env, default_machine_provider_options, default_cwd, provider_config, runtime_protection_enabled, max_total_machines, max_total_cpu, max_total_memory_mb, min_machine_cpu, min_machine_memory_mb, max_machine_cpu, max_machine_memory_mb, delete_after_idle_minutes, metadata, created_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/MachinePoolID'
@@ -9882,12 +10451,38 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine from this pool, or null when the pool default is unset.
+          type: [integer, "null"]
+          format: int32
+          minimum: 5
+          maximum: 2147483647
         metadata:
           $ref: '#/components/schemas/Metadata'
         created_at:
           $ref: '#/components/schemas/Timestamp'
         updated_at:
           $ref: '#/components/schemas/Timestamp'
+        usage:
+          description: Current quota-consuming usage. Populated when the machine pool is returned by the list endpoint.
+          $ref: '#/components/schemas/MachinePoolUsage'
+    MachinePoolUsage:
+      type: object
+      additionalProperties: false
+      required: [machines, cpu, memory_mb]
+      properties:
+        machines:
+          type: integer
+          format: int32
+          minimum: 0
+        cpu:
+          type: integer
+          format: int64
+          minimum: 0
+        memory_mb:
+          type: integer
+          format: int64
+          minimum: 0
     ListMachinePoolsResponse:
       type: object
       additionalProperties: false
@@ -9979,6 +10574,8 @@ components:
           type: string
         lifecycle_reason_message:
           type: string
+        failure_report:
+          $ref: '#/components/schemas/MachineFailureReport'
         next_reconcile_after:
           anyOf:
             - $ref: '#/components/schemas/Timestamp'
@@ -10218,7 +10815,7 @@ components:
     ProjectMachinePoolGrant:
       type: object
       additionalProperties: false
-      required: [id, org_id, project_id, machine_pool_id, description, default_machine_cpu, default_machine_memory_mb, default_machine_env_overlay, default_machine_secret_env_overlay, default_machine_provider_options_overlay, default_cwd, max_total_machines, max_total_cpu, max_total_memory_mb, min_machine_cpu, min_machine_memory_mb, max_machine_cpu, max_machine_memory_mb, metadata, created_at, updated_at]
+      required: [id, org_id, project_id, machine_pool_id, description, default_machine_cpu, default_machine_memory_mb, default_machine_env_overlay, default_machine_secret_env_overlay, default_machine_provider_options_overlay, default_cwd, max_total_machines, max_total_cpu, max_total_memory_mb, min_machine_cpu, min_machine_memory_mb, max_machine_cpu, max_machine_memory_mb, delete_after_idle_minutes, metadata, created_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/ProjectMachinePoolGrantID'
@@ -10291,6 +10888,18 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine created through this grant. Zero disables deletion for this grant; null inherits the pool default.
+          type: [integer, "null"]
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          oneOf:
+            - const: 0
+            - type: integer
+              minimum: 5
+              maximum: 2147483647
+            - type: "null"
         metadata:
           $ref: '#/components/schemas/Metadata'
         created_at:
@@ -10367,6 +10976,17 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine created through this grant. Use 0 to disable for this grant; omit to inherit the pool default. Values from 1 through 4 are invalid.
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          oneOf:
+            - const: 0
+            - type: integer
+              minimum: 5
+              maximum: 2147483647
         metadata:
           $ref: '#/components/schemas/Metadata'
     UpdateProjectMachinePoolGrantRequest:
@@ -10439,6 +11059,18 @@ components:
           format: int32
           minimum: 1
           maximum: 2147483647
+        delete_after_idle_minutes:
+          description: Idle minutes before deleting a machine created through this grant. Use 0 to disable for this grant; null restores inheritance from the pool; omitted leaves it unchanged. Values from 1 through 4 are invalid.
+          type: [integer, "null"]
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+          oneOf:
+            - const: 0
+            - type: integer
+              minimum: 5
+              maximum: 2147483647
+            - type: "null"
         metadata:
           $ref: '#/components/schemas/Metadata'
     ListProjectMachinePoolGrantsResponse:

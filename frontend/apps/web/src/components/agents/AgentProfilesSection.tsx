@@ -1,20 +1,12 @@
-import {
-  type AgentProfileListSort,
-  useAgentProfiles,
-  useCreateAgent,
-  useDeleteAgentProfile,
-} from '@omnara/react'
+import { type AgentProfileListSort, useAgentProfiles, useCreateAgent } from '@omnara/react'
 import { type AgentProfile, ApiError } from '@omnara/sdk'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 
-import { DeployAgentProfileDialog } from '@/components/agents/DeployAgentProfileDialog'
 import { SlackOAuthOutcomeDialog } from '@/components/agents/SlackOAuthOutcomeDialog'
 import { DataTable } from '@/components/data-table/DataTable'
 import { ResourceListToolbar } from '@/components/data-table/ResourceListToolbar'
-import { ResourceRowActions } from '@/components/overview/ResourceRowActions'
 import { Button } from '@/components/ui/button'
-import { Spinner } from '@/components/ui/spinner'
 import { usePagedQuery } from '@/hooks/use-paged-query'
 import { resourceSortOptions, useResourceList } from '@/hooks/use-resource-list'
 
@@ -36,11 +28,9 @@ export function AgentProfilesSection({
   })
   const paged = usePagedQuery(query, list.queryKey)
   const showToolbar = list.isFiltering || paged.pagination.page > 0 || paged.pagination.canNext
-  const deleteProfile = useDeleteAgentProfile(orgId, projectId)
   const createAgent = useCreateAgent(orgId, projectId)
   const navigate = useNavigate()
   const [launchingId, setLaunchingId] = useState<string | null>(null)
-  const [deployProfile, setDeployProfile] = useState<AgentProfile | null>(null)
 
   async function launch(profile: AgentProfile) {
     setLaunchingId(profile.id)
@@ -90,57 +80,45 @@ export function AgentProfilesSection({
               cell: (profile) => <span className="font-medium">{profile.name}</span>,
             },
             {
-              id: 'provider',
-              header: 'Provider',
-              cell: (profile) => profile.current_config.model.provider_config,
-            },
-            {
               id: 'model',
               header: 'Model',
               cell: (profile) => (
-                <span className="text-muted-foreground">{profile.current_config.model.name}</span>
+                <span className="truncate font-mono text-xs">
+                  {profile.current_config.model.name}
+                </span>
+              ),
+            },
+            {
+              id: 'provider',
+              header: 'Provider',
+              cell: (profile) => (
+                <span className="text-muted-foreground">
+                  {profile.current_config.model.provider_config}
+                </span>
               ),
             },
             {
               id: 'actions',
               header: '',
-              className: 'w-36',
+              className: 'w-24',
               isActions: true,
+              revealOnHover: false,
               cell: (profile) => (
                 <div className="flex items-center gap-1">
                   {canOperate && (
                     <Button
                       type="button"
                       size="sm"
-                      variant="secondary"
+                      variant="ghost"
+                      className="text-primary hover:text-primary h-7 px-2"
                       disabled={launchingId !== null}
+                      loading={launchingId === profile.id}
                       onClick={() => {
                         void launch(profile)
                       }}
                     >
-                      {launchingId === profile.id && <Spinner />}
                       Launch
                     </Button>
-                  )}
-                  {canManage && (
-                    <ResourceRowActions
-                      onGrant={() => {
-                        setDeployProfile(profile)
-                      }}
-                      grantLabel="Deploy to app"
-                      onDelete={() => {
-                        if (!window.confirm(`Delete agent profile ${profile.name}?`)) return
-                        deleteProfile.mutate(profile.id, {
-                          onError: (error) => {
-                            window.alert(
-                              error instanceof ApiError
-                                ? error.message
-                                : 'Could not delete agent profile',
-                            )
-                          },
-                        })
-                      }}
-                    />
                   )}
                 </div>
               ),
@@ -164,17 +142,6 @@ export function AgentProfilesSection({
           emptyMessage="No agent profiles yet. A profile is a saved, reusable agent config for launching agents in one click."
         />
       </div>
-      {canManage && deployProfile && (
-        <DeployAgentProfileDialog
-          open
-          onOpenChange={(nextOpen) => {
-            if (!nextOpen) setDeployProfile(null)
-          }}
-          orgId={orgId}
-          projectId={projectId}
-          profile={deployProfile}
-        />
-      )}
       <SlackOAuthOutcomeDialog />
     </>
   )

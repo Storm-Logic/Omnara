@@ -1,88 +1,84 @@
 import { useToolCatalog } from '@omnara/react'
 
-import { type BasicConfigDraft } from '@/components/agents/agentConfigBasicSerialization'
 import { AgentConfigMachineSourcesField } from '@/components/agents/AgentConfigMachineSourcesField'
 import { AgentConfigMcpServersField } from '@/components/agents/AgentConfigMcpServersField'
-import { AgentConfigModelField } from '@/components/agents/AgentConfigModelField'
 import { AgentConfigSkillsField } from '@/components/agents/AgentConfigSkillsField'
 import { AgentConfigToolsField } from '@/components/agents/AgentConfigToolsField'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { addMissingMachineTools, hasMissingMachineTools } from '@/components/agents/builtInTools'
+import type { AgentBuilderForm } from '@/components/agents/useAgentBuilderForm'
+import { Field, FieldGroup, RequiredFieldLabel } from '@/components/ui/field'
+import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
 
 export function AgentConfigBasicForm({
   orgId,
   projectId,
-  value,
-  onChange,
+  form,
 }: {
   orgId: string
   projectId: string
-  value: BasicConfigDraft
-  onChange: (draft: BasicConfigDraft) => void
+  form: AgentBuilderForm
 }) {
   const toolCatalog = useToolCatalog()
-  const { instruction, machineSources, mcpServers, modelName, providerConfig, skillIds, tools } =
-    value
+  const showMissingMachineTools =
+    form.machineSources.some((source) => source.name.trim() !== '') &&
+    hasMissingMachineTools(form.tools)
 
   return (
     <FieldGroup className="gap-8">
       <Field>
-        <FieldLabel htmlFor="agent-config-basic-instruction">Instruction</FieldLabel>
-        <FieldDescription>The system prompt that defines how this agent works.</FieldDescription>
+        <RequiredFieldLabel htmlFor="agent-config-basic-instruction">
+          Instructions
+        </RequiredFieldLabel>
         <Textarea
           id="agent-config-basic-instruction"
-          value={instruction}
+          required
+          value={form.instruction}
           placeholder="You are a research assistant. When given a topic, gather sources and produce a short summary with citations."
-          className="min-h-36 resize-y"
+          className="max-h-96 min-h-20 resize-y"
           onChange={(event) => {
-            onChange({ ...value, instruction: event.target.value })
+            form.setInstruction(event.target.value)
           }}
         />
       </Field>
-      <AgentConfigModelField
-        orgId={orgId}
-        projectId={projectId}
-        value={{ providerConfig, modelName }}
-        onChange={(selection) => {
-          onChange({
-            ...value,
-            providerConfig: selection.providerConfig,
-            modelName: selection.modelName,
-          })
-        }}
-      />
-      <AgentConfigMachineSourcesField
-        orgId={orgId}
-        projectId={projectId}
-        sources={machineSources}
-        onSourcesChange={(sources) => {
-          onChange({ ...value, machineSources: sources })
-        }}
-      />
-      <AgentConfigToolsField
-        catalog={toolCatalog.data}
-        tools={tools}
-        onToolsChange={(nextTools) => {
-          onChange({ ...value, tools: nextTools })
-        }}
-      />
-      <AgentConfigSkillsField
-        orgId={orgId}
-        projectId={projectId}
-        selectedIds={skillIds}
-        onSelectedIdsChange={(nextSkillIds) => {
-          onChange({ ...value, skillIds: nextSkillIds })
-        }}
-      />
-      <AgentConfigMcpServersField
-        orgId={orgId}
-        projectId={projectId}
-        permissionProfile={toolCatalog.data?.mcp_tool_permissions}
-        servers={mcpServers}
-        onServersChange={(servers) => {
-          onChange({ ...value, mcpServers: servers })
-        }}
-      />
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center gap-3 pt-2">
+          <Separator className="flex-1" />
+          <span className="text-muted-foreground shrink-0 text-xs">Optional</span>
+        </div>
+        <div className="flex flex-col gap-3">
+          <AgentConfigMachineSourcesField
+            orgId={orgId}
+            projectId={projectId}
+            sources={form.machineSources}
+            onSourcesChange={form.setMachineSources}
+            onUnavailableIdsChange={form.reportUnavailableSourceIds}
+            showMissingToolsWarning={showMissingMachineTools}
+            onAddMissingTools={() => {
+              form.setTools(addMissingMachineTools(form.tools))
+            }}
+          />
+          <AgentConfigToolsField
+            catalog={toolCatalog.data}
+            tools={form.tools}
+            onToolsChange={form.setTools}
+          />
+          <AgentConfigSkillsField
+            orgId={orgId}
+            projectId={projectId}
+            selectedIds={form.skillIds}
+            onSelectedIdsChange={form.setSkillIds}
+            onUnavailableIdsChange={form.reportUnavailableSkillIds}
+          />
+          <AgentConfigMcpServersField
+            orgId={orgId}
+            projectId={projectId}
+            permissionProfile={toolCatalog.data?.mcp_tool_permissions}
+            servers={form.mcpServers}
+            onServersChange={form.setMcpServers}
+          />
+        </div>
+      </div>
     </FieldGroup>
   )
 }

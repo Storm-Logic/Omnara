@@ -1,7 +1,7 @@
 import { useProjectAvailableSecret, useProjectAvailableSecrets } from '@omnara/react'
 import type { Secret } from '@omnara/sdk'
 
-import type { BasicMcpServer } from '@/components/agents/agentConfigBasicSerialization'
+import type { BasicMcpServer } from '@/components/agents/useAgentBuilderForm'
 import { createResourceCombobox } from '@/components/ui/resource-combobox'
 import { useInfiniteQueryItems } from '@/hooks/use-infinite-query-items'
 import { useTypeaheadSearch } from '@/hooks/use-resource-list'
@@ -13,11 +13,15 @@ const SecretCombobox = createResourceCombobox<Secret>({
 })
 
 export function AgentConfigMcpSecretCombobox({
+  id,
+  required,
   orgId,
   projectId,
   server,
   onChange,
 }: {
+  id?: string
+  required?: boolean
   orgId: string
   projectId: string
   server: BasicMcpServer
@@ -52,6 +56,8 @@ export function AgentConfigMcpSecretCombobox({
 
   return (
     <SecretCombobox
+      id={id}
+      required={required}
       items={secrets}
       value={selectedSecret}
       onValueChange={(secret) => {

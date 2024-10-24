@@ -22,13 +22,20 @@ export function Overview() {
     overview.recent_agent_profiles.length === 0
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
-      <PageBreadcrumb items={[{ label: activeOrg.name }, { label: 'Overview' }]} />
+    <div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-8">
+      <PageBreadcrumb
+        items={[
+          { id: 'organization', label: activeOrg.name },
+          { id: 'overview', label: 'Overview' },
+        ]}
+      />
 
       {overviewQuery.isPending ? (
         <Skeleton className="h-28 rounded-xl" />
       ) : showOnboarding ? (
-        <FirstAgentCard projectId={manageableProject.id} />
+        <div className="flex min-h-0 flex-1 items-center justify-center pb-16">
+          <FirstAgentCard projectId={manageableProject.id} />
+        </div>
       ) : (
         <RecentAgentsSection
           overview={overview}

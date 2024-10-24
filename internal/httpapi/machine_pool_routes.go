@@ -64,6 +64,7 @@ func (s *Server) machinePoolResponse(record executionstore.MachinePoolRecord) (o
 		MinMachineMemoryMb:            nullableInt32FromIntPtr(record.MinMachineMemoryMB),
 		MaxMachineCpu:                 nullableInt32FromIntPtr(record.MaxMachineCPU),
 		MaxMachineMemoryMb:            nullableInt32FromIntPtr(record.MaxMachineMemoryMB),
+		DeleteAfterIdleMinutes:        nullableInt32FromIntPtr(record.DeleteAfterIdleMinutes),
 		Metadata:                      metadata,
 		CreatedAt:                     record.CreatedAt,
 		UpdatedAt:                     record.UpdatedAt,
@@ -117,9 +118,14 @@ func (s strictOpenAPIServer) listMachinePools(
 	}
 	out := make([]openapi.MachinePool, 0, len(page.Pools))
 	for _, record := range page.Pools {
-		response, err := s.server.machinePoolResponse(record)
+		response, err := s.server.machinePoolResponse(record.MachinePoolRecord)
 		if err != nil {
 			return nil, err
+		}
+		response.Usage = &openapi.MachinePoolUsage{
+			Machines: record.Usage.Machines,
+			Cpu:      record.Usage.CPU,
+			MemoryMb: record.Usage.MemoryMB,
 		}
 		out = append(out, response)
 	}
@@ -206,6 +212,7 @@ func (s strictOpenAPIServer) createMachinePool(
 		MinMachineMemoryMB:            intPtrFromInt32(request.Body.MinMachineMemoryMb),
 		MaxMachineCPU:                 intPtrFromInt32(request.Body.MaxMachineCpu),
 		MaxMachineMemoryMB:            intPtrFromInt32(request.Body.MaxMachineMemoryMb),
+		DeleteAfterIdleMinutes:        intPtrFromInt32(request.Body.DeleteAfterIdleMinutes),
 		Metadata:                      metadata,
 	})
 	if err != nil {
@@ -321,6 +328,7 @@ func (s strictOpenAPIServer) updateMachinePool(
 		MinMachineMemoryMB:            nullableIntPatchFromInt32(request.Body.MinMachineMemoryMb),
 		MaxMachineCPU:                 nullableIntPatchFromInt32(request.Body.MaxMachineCpu),
 		MaxMachineMemoryMB:            nullableIntPatchFromInt32(request.Body.MaxMachineMemoryMb),
+		DeleteAfterIdleMinutes:        nullableIntPatchFromInt32(request.Body.DeleteAfterIdleMinutes),
 		Metadata:                      metadata,
 	})
 	if err != nil {

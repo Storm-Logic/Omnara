@@ -1,6 +1,6 @@
-import { Check, Copy } from 'lucide-react'
 import { useState } from 'react'
 
+import { Check, Copy } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -40,8 +40,12 @@ export function ApiTokenRevealContent({ token, onDone }: { token: string; onDone
                 event.currentTarget.select()
               }}
             />
-            <Button type="button" variant="outline" onClick={() => void copyToken()}>
-              {copied ? <Check /> : <Copy />}
+            <Button
+              type="button"
+              variant="outline"
+              icon={copied ? <Check /> : <Copy />}
+              onClick={() => void copyToken()}
+            >
               {copied ? 'Copied' : 'Copy'}
             </Button>
           </div>
