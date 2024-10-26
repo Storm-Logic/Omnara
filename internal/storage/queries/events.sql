@@ -30,6 +30,11 @@ FROM agent_events event
 JOIN agents agent ON agent.id = event.agent_id
 WHERE agent.project_id = $1 AND event.agent_id = $2;
 
+-- name: ListAgentEventFrontiers :many
+SELECT id AS agent_id, (next_event_sequence - 1)::bigint AS event_sequence
+FROM agents
+WHERE id = ANY(sqlc.arg(agent_ids)::uuid[]);
+
 -- name: ListCompactionSourceEvents :many
 SELECT event.id,
        event.sequence,
@@ -81,7 +86,11 @@ LEFT JOIN LATERAL (
       ELSE NULL
     END
     ORDER BY block.ordinal, block.id
-  ) FILTER (WHERE block.id IS NOT NULL AND block.block_kind IN ('text', 'structured_data', 'artifact', 'reasoning', 'tool_call', 'error')), '[]'::jsonb) AS content_parts
+  ) FILTER (
+    WHERE block.id IS NOT NULL
+      AND block.block_kind IN ('text', 'structured_data', 'artifact', 'reasoning', 'tool_call', 'error')
+      AND NOT block.exclude_from_model_context
+  ), '[]'::jsonb) AS content_parts
   FROM content_blocks block
   LEFT JOIN tool_calls tool_block_call
     ON tool_block_call.agent_id = block.agent_id

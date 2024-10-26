@@ -134,6 +134,41 @@ func (q *Queries) LatestAgentEvent(ctx context.Context, arg LatestAgentEventPara
 	return i, err
 }
 
+const listAgentEventFrontiers = `-- name: ListAgentEventFrontiers :many
+SELECT id AS agent_id, (next_event_sequence - 1)::bigint AS event_sequence
+FROM agents
+WHERE id = ANY($1::uuid[])
+`
+
+type ListAgentEventFrontiersParams struct {
+	AgentIds []uuid.UUID
+}
+
+type ListAgentEventFrontiersRow struct {
+	AgentID       uuid.UUID
+	EventSequence int64
+}
+
+func (q *Queries) ListAgentEventFrontiers(ctx context.Context, arg ListAgentEventFrontiersParams) ([]ListAgentEventFrontiersRow, error) {
+	rows, err := q.db.Query(ctx, listAgentEventFrontiers, arg.AgentIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAgentEventFrontiersRow{}
+	for rows.Next() {
+		var i ListAgentEventFrontiersRow
+		if err := rows.Scan(&i.AgentID, &i.EventSequence); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCompactionAtomicGroups = `-- name: ListCompactionAtomicGroups :many
 WITH atomic_groups AS (
   SELECT 'tool_call_result'::text AS group_kind,
@@ -271,7 +306,11 @@ LEFT JOIN LATERAL (
       ELSE NULL
     END
     ORDER BY block.ordinal, block.id
-  ) FILTER (WHERE block.id IS NOT NULL AND block.block_kind IN ('text', 'structured_data', 'artifact', 'reasoning', 'tool_call', 'error')), '[]'::jsonb) AS content_parts
+  ) FILTER (
+    WHERE block.id IS NOT NULL
+      AND block.block_kind IN ('text', 'structured_data', 'artifact', 'reasoning', 'tool_call', 'error')
+      AND NOT block.exclude_from_model_context
+  ), '[]'::jsonb) AS content_parts
   FROM content_blocks block
   LEFT JOIN tool_calls tool_block_call
     ON tool_block_call.agent_id = block.agent_id
