@@ -1,16 +1,18 @@
 import { CREATED_RESOURCE_LIST_SORTS, RESOURCE_LIST_SORTS } from '@omnara/react'
 import { useEffect, useState } from 'react'
 
+import type { PaginationControls } from '@/hooks/use-paged-query'
+
 export interface SortOption<TSort extends string = string> {
   label: string
   value: TSort
 }
 
-const sortFieldLabels: Record<string, string> = {
-  name: 'Name',
-  created_at: 'Created',
-  updated_at: 'Modified',
-}
+const sortFieldLabels = new Map([
+  ['name', 'Name'],
+  ['created_at', 'Created'],
+  ['updated_at', 'Modified'],
+])
 
 export function createSortOptions<TSort extends string>(
   values: readonly TSort[],
@@ -19,7 +21,7 @@ export function createSortOptions<TSort extends string>(
   return values.map((value) => {
     const descending = value.startsWith('-')
     const field = descending ? value.slice(1) : value
-    const fieldLabel = fieldLabelOverrides[field] ?? sortFieldLabels[field] ?? field
+    const fieldLabel = fieldLabelOverrides[field] ?? sortFieldLabels.get(field) ?? field
     const direction =
       field === 'name' ? (descending ? 'Z–A' : 'A–Z') : descending ? 'Newest' : 'Oldest'
     return { value, label: `${fieldLabel}: ${direction}` }
@@ -29,11 +31,15 @@ export function createSortOptions<TSort extends string>(
 export const resourceSortOptions = createSortOptions(RESOURCE_LIST_SORTS)
 export const createdResourceSortOptions = createSortOptions(CREATED_RESOURCE_LIST_SORTS)
 
+export interface ResourceListFilters {
+  name?: string
+}
+
 export function useResourceList<TSort extends string>(defaultSort: TSort) {
   const { search, setSearch, name } = useTypeaheadSearch()
   const [sort, setSort] = useState<TSort>(defaultSort)
 
-  const apiFilters: Record<string, unknown> = name ? { name } : {}
+  const apiFilters: ResourceListFilters = name ? { name } : {}
 
   return {
     search,
@@ -44,6 +50,22 @@ export function useResourceList<TSort extends string>(defaultSort: TSort) {
     isFiltering: name !== undefined,
     queryKey: JSON.stringify([apiFilters, sort]),
   }
+}
+
+/** Preserve visibility during loading and errors; only successful results can hide controls. */
+export function useListToolbarVisibility(
+  list: { search: string; isFiltering: boolean },
+  pagination: Pick<PaginationControls, 'page' | 'canNext'>,
+  isSuccess: boolean,
+): boolean {
+  const [wasVisible, setWasVisible] = useState(false)
+  const visible =
+    list.isFiltering ||
+    list.search !== '' ||
+    (isSuccess ? pagination.page > 0 || pagination.canNext : wasVisible)
+
+  if (visible !== wasVisible) setWasVisible(visible)
+  return visible
 }
 
 export function nameGlob(value: string) {

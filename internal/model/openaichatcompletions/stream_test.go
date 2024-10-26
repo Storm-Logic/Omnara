@@ -302,14 +302,20 @@ func TestChatCompletionsClientRespondStreamsWhenSinkPresent(t *testing.T) {
 	var sent map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Accept") != "text/event-stream" {
-			t.Fatalf("Accept = %q, want text/event-stream", r.Header.Get("Accept"))
+			t.Errorf("Accept = %q, want text/event-stream", r.Header.Get("Accept"))
+			http.Error(w, "test handler failed", http.StatusInternalServerError)
+			return
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("read request: %v", err)
+			t.Errorf("read request: %v", err)
+			http.Error(w, "test handler failed", http.StatusInternalServerError)
+			return
 		}
 		if err := json.Unmarshal(body, &sent); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Errorf("decode request: %v", err)
+			http.Error(w, "test handler failed", http.StatusInternalServerError)
+			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(chatCompletionsSSE(
@@ -742,5 +748,22 @@ func TestChatCompletionsConsumeMalformedStreamIsAmbiguous(t *testing.T) {
 	_, err := consumeChatCompletionsStream(t, stream, &chatRecordingSink{}, modelprotocol.APIVariantDefault)
 	if !model.IsAmbiguousProviderOutcome(err) {
 		t.Fatalf("malformed stream = %T %v, want ambiguous outcome", err, err)
+	}
+}
+
+func TestChatCompletionsConsumeStreamRecordsOpenRouterServedProvider(t *testing.T) {
+	stream := chatCompletionsSSE(
+		`{"id":"chatcmpl_1","model":"moonshotai/kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"}}]}`,
+		`{"id":"chatcmpl_1","model":"moonshotai/kimi-k3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"chatcmpl_1","model":"moonshotai/kimi-k3","provider":"Moonshot AI","choices":[],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":1,"cost":0.00001}}`,
+		`[DONE]`,
+	)
+	resp, err := consumeChatCompletionsStream(t, stream, &chatRecordingSink{}, modelprotocol.APIVariantOpenRouter)
+	if err != nil {
+		t.Fatalf("consume stream: %v", err)
+	}
+	if resp.ProviderMetadata.OpenRouter.Provider != "Moonshot AI" {
+		t.Fatalf("provider metadata = %+v, want OpenRouter provider Moonshot AI", resp.ProviderMetadata)
 	}
 }

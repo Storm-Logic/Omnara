@@ -1,36 +1,47 @@
-import type { ConnectByoMachineResponse } from '@omnara/sdk'
 import { describe, expect, it } from 'vitest'
 
 import {
   classifyDaemonSupervision,
   ensureDaemonApiUrl,
   ensureSupportedPlatform,
-  formatMachineSetup,
+  installCommand,
 } from './machine-setup.ts'
 
 it('builds install instructions from the API origin', () => {
-  const formatted = formatMachineSetup({} as ConnectByoMachineResponse, {
-    apiUrl: 'https://api.example.com/v1',
-  })
-  expect(formatted.value).toMatchObject({
-    install_command: "curl -fsSL 'https://api.example.com/install/omnarad.sh' | sh",
-  })
+  expect(installCommand('https://api.example.com/v1')).toBe(
+    "curl -fsSL 'https://api.example.com/install/omnarad.sh' | sh",
+  )
 })
 
 describe('machine create-local preflight', () => {
   it('accepts the platforms the omnarad installer supports', () => {
     expect(() => {
-      ensureSupportedPlatform('darwin', 'arm64')
+      ensureSupportedPlatform('darwin', 'arm64', '22.0.0')
     }).not.toThrow()
     expect(() => {
-      ensureSupportedPlatform('linux', 'x64')
+      ensureSupportedPlatform('linux', 'x64', '6.8.0')
     }).not.toThrow()
     expect(() => {
-      ensureSupportedPlatform('win32', 'x64')
+      ensureSupportedPlatform('win32', 'x64', '10.0.0')
     }).toThrow(/macOS and Linux/)
     expect(() => {
-      ensureSupportedPlatform('linux', 'ia32')
+      ensureSupportedPlatform('linux', 'ia32', '6.8.0')
     }).toThrow(/amd64 and arm64/)
+  })
+
+  it.each(['20.6.0', '21.6.0', '', 'unknown'])(
+    'rejects unsupported Darwin release %j',
+    (osRelease) => {
+      expect(() => {
+        ensureSupportedPlatform('darwin', 'x64', osRelease)
+      }).toThrow(/macOS 13 or later/)
+    },
+  )
+
+  it('accepts later macOS releases', () => {
+    expect(() => {
+      ensureSupportedPlatform('darwin', 'x64', '25.0.0')
+    }).not.toThrow()
   })
 
   it('accepts API URLs the daemon canonicalizes', () => {

@@ -12,6 +12,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/modelcontext"
 	"github.com/omnara-ai/omnara/internal/modelenvelope"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
+	"github.com/stretchr/testify/require"
 )
 
 func TestModelWindowForRequestUsesExactPolicy(t *testing.T) {
@@ -52,9 +53,7 @@ func TestPrepareForSendIgnoresProviderNeutralBundleSize(t *testing.T) {
 			ErrorSource: "test_api",
 		},
 	)
-	if err != nil {
-		t.Fatalf("prepare small provider request from large neutral bundle: %v", err)
-	}
+	require.NoError(t, err, "prepare small provider request from large neutral bundle")
 	if string(prepared.Body) != string(body) ||
 		prepared.InputTokenEstimate != modelcontext.EstimatePreparedRequest(body, nil) {
 		t.Fatalf("prepared request / estimate = %s/%d", prepared.Body, prepared.InputTokenEstimate)
@@ -96,9 +95,7 @@ func TestPrepareForSendAssessesSerializedRequestEstimate(t *testing.T) {
 			ErrorSource: "test_api",
 		},
 	)
-	if err != nil {
-		t.Fatalf("prepare over-budget request: %v", err)
-	}
+	require.NoError(t, err, "prepare over-budget request")
 	if prepared.InputBudget.Fits() || prepared.InputBudget.EstimatedInputTokens != 900 ||
 		prepared.InputBudget.UsableInputTokens != 750 {
 		t.Fatalf("serialized request assessment = %+v, want 900 > 750", prepared.InputBudget)
@@ -113,9 +110,7 @@ func TestPrepareForSendAssessesSerializedRequestEstimate(t *testing.T) {
 			ErrorSource: "test_api",
 		},
 	)
-	if err != nil {
-		t.Fatalf("prepare fitting serialized request: %v", err)
-	}
+	require.NoError(t, err, "prepare fitting serialized request")
 	if prepared.InputTokenEstimate != 750 || !prepared.InputBudget.Fits() ||
 		string(prepared.Body) != `{"request":true}` {
 		t.Fatalf("exact-boundary prepared request / assessment = %s/%+v", prepared.Body, prepared.InputBudget)
@@ -256,18 +251,17 @@ func TestPrepareForSendEnforcesLiveModalities(t *testing.T) {
 	}
 
 	bundle.RenderedMedia[0].Representation = modelcontext.MediaRepresentationInline
-	bundle.RenderedMedia[0].Media.MediaType = "application/pdf"
+	bundle.RenderedMedia[0].RouteParsed = true
 	prepareInput.Context = bundle
-	client.apiVariant = modelprotocol.APIVariantOpenRouter
 	if _, err := PrepareForSend(context.Background(), client, prepareInput); err != nil {
-		t.Fatalf("OpenRouter PDF: %v", err)
+		t.Fatalf("route-parsed document: %v", err)
 	}
 
-	bundle.RenderedMedia[0].Media.MediaType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	bundle.RenderedMedia[0].RouteParsed = false
 	prepareInput.Context = bundle
 	_, err = PrepareForSend(context.Background(), client, prepareInput)
 	if !errors.As(err, &providerErr) || providerErr.Code != "unsupported_input_modality" {
-		t.Fatalf("OpenRouter Office file modality error = %v, want unsupported input modality", err)
+		t.Fatalf("file modality error = %v, want unsupported input modality", err)
 	}
 
 	client.capabilities.InputModalities = []string{"text", "image", "file"}
@@ -378,6 +372,7 @@ type prepareForSendClient struct {
 
 func (c prepareForSendClient) RequestedProviderModelSlug() string { return "prepare-test" }
 func (prepareForSendClient) APIFormat() modelprotocol.APIFormat   { return "test" }
+
 func (c prepareForSendClient) ModelAPIVariant() modelprotocol.APIVariant {
 	return c.apiVariant
 }
@@ -470,9 +465,7 @@ func TestResponseEnvelopePreservesOrderedContentParts(t *testing.T) {
 		},
 		StopReason: modelenvelope.StopReasonEndTurn,
 	})
-	if err != nil {
-		t.Fatalf("response envelope: %v", err)
-	}
+	require.NoError(t, err, "response envelope")
 	if len(envelope.Normalized.Content) != 3 {
 		t.Fatalf("content parts = %+v, want 3", envelope.Normalized.Content)
 	}
@@ -488,9 +481,7 @@ func TestResponseEnvelopeAcceptsEmptySuccessfulContent(t *testing.T) {
 		ID:         "resp_empty",
 		StopReason: modelenvelope.StopReasonEndTurn,
 	})
-	if err != nil {
-		t.Fatalf("response envelope: %v", err)
-	}
+	require.NoError(t, err, "response envelope")
 	if len(envelope.Normalized.Content) != 0 ||
 		envelope.Normalized.StopReason != modelenvelope.StopReasonEndTurn {
 		t.Fatalf("empty successful response changed: %+v", envelope.Normalized)
@@ -506,9 +497,7 @@ func TestResponseEnvelopeAcceptsReasoningParts(t *testing.T) {
 		},
 		StopReason: modelenvelope.StopReasonEndTurn,
 	})
-	if err != nil {
-		t.Fatalf("response envelope: %v", err)
-	}
+	require.NoError(t, err, "response envelope")
 	if len(envelope.Normalized.Content) != 2 ||
 		envelope.Normalized.Content[0].Type != "reasoning" ||
 		envelope.Normalized.Content[0].Text != "visible summary" ||
@@ -533,9 +522,7 @@ func TestResponseEnvelopeAcceptsWholeOutputReplayAndRejectsNull(t *testing.T) {
 		Content:        []ResponsePart{{Type: "text", Text: "answer"}},
 		StopReason:     modelenvelope.StopReasonEndTurn,
 	})
-	if err != nil {
-		t.Fatalf("null replay should be treated as absent: %v", err)
-	}
+	require.NoError(t, err, "null replay should be treated as absent")
 }
 
 func TestValidateProviderJSONRejectsDatabaseUnsafeStrings(t *testing.T) {
@@ -654,80 +641,4 @@ func (replayIdentityClient) Prepare(context.Context, PrepareInput) (PreparedRequ
 }
 func (replayIdentityClient) Respond(context.Context, Request) (Response, error) {
 	return Response{}, nil
-}
-
-func TestEffectiveCacheRetentionDefaultsAnthropicToShort(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		format    modelprotocol.APIFormat
-		variant   modelprotocol.APIVariant
-		slug      string
-		retention CacheRetention
-		want      CacheRetention
-	}{
-		{
-			name:    "anthropic messages unset",
-			format:  modelprotocol.APIFormatAnthropicMessages,
-			variant: modelprotocol.APIVariantDefault,
-			slug:    "claude-sonnet-4",
-			want:    CacheRetentionShort,
-		},
-		{
-			name:    "anthropic messages bedrock unset",
-			format:  modelprotocol.APIFormatAnthropicMessages,
-			variant: modelprotocol.APIVariantBedrock,
-			slug:    "claude-sonnet-4",
-			want:    CacheRetentionShort,
-		},
-		{
-			name:    "openrouter claude unset",
-			format:  modelprotocol.APIFormatOpenAIChatCompletions,
-			variant: modelprotocol.APIVariantOpenRouter,
-			slug:    "~Anthropic/Claude-Sonnet-4",
-			want:    CacheRetentionShort,
-		},
-		{
-			name:    "openrouter non-claude unset",
-			format:  modelprotocol.APIFormatOpenAIChatCompletions,
-			variant: modelprotocol.APIVariantOpenRouter,
-			slug:    "openai/gpt-5",
-			want:    CacheRetentionNone,
-		},
-		{
-			name:    "chat completions default variant unset",
-			format:  modelprotocol.APIFormatOpenAIChatCompletions,
-			variant: modelprotocol.APIVariantDefault,
-			slug:    "anthropic/claude-sonnet-4",
-			want:    CacheRetentionNone,
-		},
-		{
-			name:    "responses unset",
-			format:  modelprotocol.APIFormatOpenAIResponses,
-			variant: modelprotocol.APIVariantDefault,
-			slug:    "gpt-5",
-			want:    CacheRetentionNone,
-		},
-		{
-			name:      "explicit none wins",
-			format:    modelprotocol.APIFormatAnthropicMessages,
-			variant:   modelprotocol.APIVariantDefault,
-			slug:      "claude-sonnet-4",
-			retention: CacheRetentionNone,
-			want:      CacheRetentionNone,
-		},
-		{
-			name:      "explicit long wins",
-			format:    modelprotocol.APIFormatOpenAIResponses,
-			variant:   modelprotocol.APIVariantDefault,
-			slug:      "gpt-5",
-			retention: CacheRetentionLong,
-			want:      CacheRetentionLong,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := EffectiveCacheRetention(tc.format, tc.variant, tc.slug, tc.retention); got != tc.want {
-				t.Fatalf("effective cache retention = %q, want %q", got, tc.want)
-			}
-		})
-	}
 }

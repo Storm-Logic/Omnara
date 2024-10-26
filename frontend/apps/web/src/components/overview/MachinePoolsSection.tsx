@@ -16,10 +16,15 @@ import {
 import { ResourceRowActions } from '@/components/overview/ResourceRowActions'
 import { Button } from '@/components/ui/button'
 import { usePagedQuery } from '@/hooks/use-paged-query'
-import { resourceSortOptions, useResourceList } from '@/hooks/use-resource-list'
+import {
+  resourceSortOptions,
+  useListToolbarVisibility,
+  useResourceList,
+} from '@/hooks/use-resource-list'
 import { formatDateTime } from '@/lib/format'
 import { formatMemoryGb } from '@/lib/machine-memory'
 import { canManageOrg } from '@/lib/permissions'
+import { providerOptionStrings } from '@/lib/provider-options'
 import { useActiveOrg } from '@/lib/use-active-org'
 
 type ActiveDialog =
@@ -34,6 +39,7 @@ export function MachinePoolsSection() {
   const list = useResourceList<MachinePoolListSort>('-created_at')
   const query = useMachinePools(activeOrg.id, { filters: list.apiFilters, sort: list.sort })
   const paged = usePagedQuery(query, list.queryKey)
+  const showToolbar = useListToolbarVisibility(list, paged.pagination, query.isSuccess)
   const deletePool = useDeleteMachinePool(activeOrg.id)
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null)
 
@@ -55,14 +61,16 @@ export function MachinePoolsSection() {
         <SearchHeader
           title="Machine pools"
           toolbar={
-            <ResourceListToolbar
-              search={list.search}
-              onSearchChange={list.setSearch}
-              sort={list.sort}
-              sortOptions={resourceSortOptions}
-              onSortChange={list.setSort}
-              placeholder="Search pools by name…"
-            />
+            showToolbar ? (
+              <ResourceListToolbar
+                search={list.search}
+                onSearchChange={list.setSearch}
+                sort={list.sort}
+                sortOptions={resourceSortOptions}
+                onSortChange={list.setSort}
+                placeholder="Search pools by name…"
+              />
+            ) : undefined
           }
         >
           {newPoolButton()}
@@ -152,7 +160,8 @@ export function MachinePoolsSection() {
                   label: 'Startup script',
                   value: (
                     <span className="whitespace-pre-wrap">
-                      {stringValue(pool.default_machine_provider_options.startup_script) ?? 'None'}
+                      {providerOptionStrings(pool.default_machine_provider_options)
+                        .startup_script ?? 'None'}
                     </span>
                   ),
                   mono: true,
@@ -280,29 +289,25 @@ function formatResourceUsage(pool: MachinePool) {
 function providerDetails(pool: MachinePool): DetailItem[] {
   if (!isMachinePoolProvider(pool.provider)) return []
   const definition = machinePoolProviderDefinitions[pool.provider]
-  const options = pool.default_machine_provider_options
+  const options = providerOptionStrings(pool.default_machine_provider_options)
   const details: DetailItem[] = [
     {
       label: `${definition.label} ${definition.resource.label.toLowerCase()}`,
-      value: stringValue(options[definition.resource.key]),
+      value: options[definition.resource.key],
       mono: true,
     },
     {
       label: `${definition.label} ${definition.location.label.toLowerCase()}`,
-      value: stringValue(options[definition.location.key]),
+      value: options[definition.location.key],
     },
   ]
   if (definition.requiresWorkspace) {
     details.push({
       label: `${definition.label} workspace`,
-      value: stringValue(pool.provider_config.workspace),
+      value: providerOptionStrings(pool.provider_config).workspace,
     })
   }
   return details
-}
-
-function stringValue(value: unknown) {
-  return typeof value === 'string' ? value : undefined
 }
 
 function formatEntries(values: Record<string, string>) {

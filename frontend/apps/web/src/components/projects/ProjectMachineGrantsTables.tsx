@@ -23,17 +23,18 @@ import { usePagedQuery } from '@/hooks/use-paged-query'
 import {
   createdResourceSortOptions,
   resourceSortOptions,
+  useListToolbarVisibility,
   useResourceList,
 } from '@/hooks/use-resource-list'
 import { formatDateTime } from '@/lib/format'
 import { formatMemoryGb } from '@/lib/machine-memory'
 import { canManageOrg } from '@/lib/permissions'
+import { type ProviderOptions, providerOptionSummaries } from '@/lib/provider-options'
 import { useActiveOrg } from '@/lib/use-active-org'
 
-function overlaySummary(overlay: Record<string, unknown>) {
-  const summary = Object.entries(overlay)
-    .map(([key, value]) => {
-      const text = typeof value === 'string' ? value : JSON.stringify(value)
+function overlaySummary(overlay: ProviderOptions) {
+  const summary = Object.entries(providerOptionSummaries(overlay))
+    .map(([key, text]) => {
       return text.length > 60 || text.includes('\n')
         ? `${key}: (${text.length} chars)`
         : `${key}: ${text}`
@@ -62,12 +63,22 @@ export function ProjectMachineGrantsTables({
     sort: poolList.sort,
   })
   const grantsPaged = usePagedQuery(grantsQuery, poolList.queryKey)
+  const poolToolbarVisible = useListToolbarVisibility(
+    poolList,
+    grantsPaged.pagination,
+    grantsQuery.isSuccess,
+  )
   const machineList = useResourceList<ProjectMachineGrantListSort>('-updated_at')
   const machineGrantsQuery = useProjectMachineGrants(orgId, projectId, {
     filters: machineList.apiFilters,
     sort: machineList.sort,
   })
   const machineGrantsPaged = usePagedQuery(machineGrantsQuery, machineList.queryKey)
+  const machineToolbarVisible = useListToolbarVisibility(
+    machineList,
+    machineGrantsPaged.pagination,
+    machineGrantsQuery.isSuccess,
+  )
   const deleteGrant = useDeleteProjectMachinePoolGrant(orgId, projectId)
   const deleteMachineGrant = useDeleteProjectMachineGrant(orgId, projectId)
   const [editing, setEditing] = useState<ProjectMachinePoolGrantListItem | null>(null)
@@ -80,14 +91,16 @@ export function ProjectMachineGrantsTables({
         <SearchHeader
           title="Machine pool grants"
           toolbar={
-            <ResourceListToolbar
-              search={poolList.search}
-              onSearchChange={poolList.setSearch}
-              sort={poolList.sort}
-              sortOptions={createdResourceSortOptions}
-              onSortChange={poolList.setSort}
-              placeholder="Search pool grants by name…"
-            />
+            poolToolbarVisible ? (
+              <ResourceListToolbar
+                search={poolList.search}
+                onSearchChange={poolList.setSearch}
+                sort={poolList.sort}
+                sortOptions={createdResourceSortOptions}
+                onSortChange={poolList.setSort}
+                placeholder="Search pool grants by name…"
+              />
+            ) : undefined
           }
         >
           {
@@ -210,14 +223,16 @@ export function ProjectMachineGrantsTables({
         <SearchHeader
           title="Machine grants"
           toolbar={
-            <ResourceListToolbar
-              search={machineList.search}
-              onSearchChange={machineList.setSearch}
-              sort={machineList.sort}
-              sortOptions={resourceSortOptions}
-              onSortChange={machineList.setSort}
-              placeholder="Search machine grants by name…"
-            />
+            machineToolbarVisible ? (
+              <ResourceListToolbar
+                search={machineList.search}
+                onSearchChange={machineList.setSearch}
+                sort={machineList.sort}
+                sortOptions={resourceSortOptions}
+                onSortChange={machineList.setSort}
+                placeholder="Search machine grants by name…"
+              />
+            ) : undefined
           }
         >
           <GrantMachineButton />

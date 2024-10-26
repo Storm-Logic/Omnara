@@ -5,9 +5,11 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/omnara-ai/omnara/internal/publicid"
+	"github.com/omnara-ai/omnara/internal/testutil"
 )
 
 func TestCronTriggerRoutes(t *testing.T) {
@@ -19,7 +21,7 @@ func TestCronTriggerRoutes(t *testing.T) {
 
 	project := bootstrapPublicHTTPProject(t, handler, "cron-triggers")
 	profile := createPublicHTTPAgent(t, handler, project, "cron-triggers-profile", project.AdminToken)
-	profileID := profile["id"].(string)
+	profileID := testutil.RequireType[string](t, profile["id"])
 	triggersPath := project.ProjectPath + "/cron-triggers"
 
 	created := requestJSONWithHeaders(
@@ -33,7 +35,7 @@ func TestCronTriggerRoutes(t *testing.T) {
 		http.StatusCreated,
 		authHeaders(project.AdminToken),
 	)
-	triggerID := created["id"].(string)
+	triggerID := testutil.RequireType[string](t, created["id"])
 	if created["name"] != "daily-triage" {
 		t.Fatalf("unexpected name: %+v", created)
 	}
@@ -46,15 +48,22 @@ func TestCronTriggerRoutes(t *testing.T) {
 	if created["enabled"] != true {
 		t.Fatalf("expected trigger enabled by default: %+v", created)
 	}
+	if _, ok := created["delivery_mode"]; ok {
+		t.Fatalf("delivery_mode must not be a top-level field: %+v", created)
+	}
 	if created["last_fired_at"] != nil {
 		t.Fatalf("expected null last_fired_at: %+v", created)
 	}
 	if created["next_fire_at"] == nil {
 		t.Fatalf("expected next_fire_at for enabled trigger: %+v", created)
 	}
-	target := created["target"].(map[string]any)
+	target := testutil.RequireType[map[string]any](t, created["target"])
 	if target["type"] != "profile" || target["agent_profile_id"] != profileID {
 		t.Fatalf("unexpected target: %+v", target)
+	}
+
+	if _, ok := target["delivery_mode"]; ok {
+		t.Fatalf("profile target must not expose delivery_mode: %+v", target)
 	}
 
 	replayed := requestJSONWithHeaders(
@@ -106,6 +115,28 @@ func TestCronTriggerRoutes(t *testing.T) {
 		authHeaders(project.AdminToken),
 	)
 
+	requestJSONWithHeaders(
+		t,
+		handler,
+		http.MethodPost,
+		triggersPath,
+		`{"name":"profile-steering","target":{"type":"profile","agent_profile_id":"`+profileID+`","delivery_mode":"steering"},`+
+			`"cron":"0 9 * * *","message_template":"Profile steering."}`,
+		"idem-cron-trigger-profile-steering",
+		http.StatusBadRequest,
+		authHeaders(project.AdminToken),
+	)
+	requestJSONWithHeaders(
+		t,
+		handler,
+		http.MethodPatch,
+		triggersPath+"/"+triggerID,
+		`{"target":{"type":"profile","agent_profile_id":"`+profileID+`","delivery_mode":"steering"}}`,
+		"",
+		http.StatusBadRequest,
+		authHeaders(project.AdminToken),
+	)
+
 	otherProject := bootstrapPublicHTTPProject(t, handler, "cron-triggers-foreign")
 	foreignProfile := createPublicHTTPAgent(
 		t,
@@ -120,7 +151,7 @@ func TestCronTriggerRoutes(t *testing.T) {
 		http.MethodPost,
 		triggersPath,
 		`{"name":"foreign-target","target":{"type":"profile","agent_profile_id":"`+
-			foreignProfile["id"].(string)+`"},`+
+			testutil.RequireType[string](t, foreignProfile["id"])+`"},`+
 			`"cron":"0 9 * * *","message_template":"Foreign target."}`,
 		"idem-cron-trigger-foreign-target",
 		http.StatusNotFound,
@@ -128,19 +159,33 @@ func TestCronTriggerRoutes(t *testing.T) {
 	)
 
 	launch := launchPublicHTTPAgent(t, handler, project, "cron-triggers-agent", project.AdminToken, http.StatusCreated)
-	agentID := launch["agent"].(map[string]any)["id"].(string)
+	agentID := testutil.RequireType[string](t, testutil.RequireType[map[string]any](t, launch["agent"])["id"])
+	agentCreateBody := `{"name":"agent-nudge","target":{"type":"agent","agent_id":"` + agentID + `","delivery_mode":"steering"},` +
+		`"cron":"30 8 * * *","timezone":"America/New_York","message_template":"Check the queue.",` +
+		`"enabled":false}`
 	agentTrigger := requestJSONWithHeaders(
 		t,
 		handler,
 		http.MethodPost,
 		triggersPath,
-		`{"name":"agent-nudge","target":{"type":"agent","agent_id":"`+agentID+`"},`+
-			`"cron":"30 8 * * *","timezone":"America/New_York","message_template":"Check the queue.","enabled":false}`,
+		agentCreateBody,
 		"idem-cron-trigger-agent",
 		http.StatusCreated,
 		authHeaders(project.AdminToken),
 	)
-	agentTriggerID := agentTrigger["id"].(string)
+	agentTriggerID := testutil.RequireType[string](t, agentTrigger["id"])
+	agentReplay := requestJSONWithHeaders(t, handler, http.MethodPost, triggersPath,
+		agentCreateBody, "idem-cron-trigger-agent", http.StatusOK, authHeaders(project.AdminToken))
+	if agentReplay["id"] != agentTriggerID ||
+		testutil.RequireType[map[string]any](t, agentReplay["target"])["delivery_mode"] != "steering" {
+		t.Fatalf("idempotent replay must preserve target delivery mode: %+v", agentReplay)
+	}
+	requestJSONWithHeaders(t, handler, http.MethodPost, triggersPath,
+		strings.Replace(agentCreateBody, `"steering"`, `"queued"`, 1),
+		"idem-cron-trigger-agent", http.StatusConflict, authHeaders(project.AdminToken))
+	requestJSONWithHeaders(t, handler, http.MethodPost, triggersPath,
+		strings.Replace(agentCreateBody, `"target":`, `"delivery_mode":"steering","target":`, 1),
+		"", http.StatusBadRequest, authHeaders(project.AdminToken))
 	if agentTrigger["timezone"] != "America/New_York" {
 		t.Fatalf("unexpected timezone: %+v", agentTrigger)
 	}
@@ -150,10 +195,59 @@ func TestCronTriggerRoutes(t *testing.T) {
 	if agentTrigger["next_fire_at"] != nil {
 		t.Fatalf("disabled trigger should have null next_fire_at: %+v", agentTrigger)
 	}
-	agentTarget := agentTrigger["target"].(map[string]any)
+	agentTarget := testutil.RequireType[map[string]any](t, agentTrigger["target"])
 	if agentTarget["type"] != "agent" || agentTarget["agent_id"] != agentID {
 		t.Fatalf("unexpected agent target: %+v", agentTarget)
 	}
+	if agentTarget["delivery_mode"] != "steering" {
+		t.Fatalf("expected steering delivery_mode: %+v", agentTrigger)
+	}
+	if _, ok := agentTrigger["delivery_mode"]; ok {
+		t.Fatalf("delivery_mode must only appear on the agent target: %+v", agentTrigger)
+	}
+	for _, body := range []string{
+		`{"message_template":"Check the queue."}`,
+		`{"target":{"type":"agent","agent_id":"` + agentID + `"}}`,
+	} {
+		preserved := requestJSONWithHeaders(t, handler, http.MethodPatch, triggersPath+"/"+agentTriggerID,
+			body, "", http.StatusOK, authHeaders(project.AdminToken))
+		if testutil.RequireType[map[string]any](t, preserved["target"])["delivery_mode"] != "steering" {
+			t.Fatalf("patch without delivery_mode must preserve steering: %+v", preserved)
+		}
+	}
+	otherLaunch := launchPublicHTTPAgent(t, handler, project, "other-cron-agent", project.AdminToken, http.StatusCreated)
+	otherAgentID := testutil.RequireType[string](t, testutil.RequireType[map[string]any](t, otherLaunch["agent"])["id"])
+	for _, body := range []string{
+		`{"delivery_mode":"queued"}`,
+		`{"target":{"type":"profile","agent_profile_id":"` + profileID + `"}}`,
+		`{"target":{"type":"agent","agent_id":"` + otherAgentID + `","delivery_mode":"queued"}}`,
+	} {
+		requestJSONWithHeaders(t, handler, http.MethodPatch, triggersPath+"/"+agentTriggerID,
+			body, "", http.StatusBadRequest, authHeaders(project.AdminToken))
+	}
+	requeued := requestJSONWithHeaders(
+		t,
+		handler,
+		http.MethodPatch,
+		triggersPath+"/"+agentTriggerID,
+		`{"target":{"type":"agent","agent_id":"`+agentID+`","delivery_mode":"queued"}}`,
+		"",
+		http.StatusOK,
+		authHeaders(project.AdminToken),
+	)
+	if testutil.RequireType[map[string]any](t, requeued["target"])["delivery_mode"] != "queued" {
+		t.Fatalf("expected delivery_mode patched to queued: %+v", requeued)
+	}
+	requestJSONWithHeaders(
+		t,
+		handler,
+		http.MethodPatch,
+		triggersPath+"/"+agentTriggerID,
+		`{"target":{"type":"agent","agent_id":"`+agentID+`","delivery_mode":"immediate"}}`,
+		"",
+		http.StatusBadRequest,
+		authHeaders(project.AdminToken),
+	)
 
 	listed := requestJSONWithHeaders(
 		t,
@@ -165,7 +259,7 @@ func TestCronTriggerRoutes(t *testing.T) {
 		http.StatusOK,
 		authHeaders(project.AdminToken),
 	)
-	if data := listed["data"].([]any); len(data) != 2 {
+	if data := testutil.RequireType[[]any](t, listed["data"]); len(data) != 2 {
 		t.Fatalf("expected 2 cron triggers, got %d: %+v", len(data), data)
 	}
 	if listed["next_cursor"] != nil {
@@ -182,8 +276,8 @@ func TestCronTriggerRoutes(t *testing.T) {
 		http.StatusOK,
 		authHeaders(project.AdminToken),
 	)
-	agentRows := byAgent["data"].([]any)
-	if len(agentRows) != 1 || agentRows[0].(map[string]any)["id"] != agentTriggerID {
+	agentRows := testutil.RequireType[[]any](t, byAgent["data"])
+	if len(agentRows) != 1 || testutil.RequireType[map[string]any](t, agentRows[0])["id"] != agentTriggerID {
 		t.Fatalf("agent_id filter returned wrong rows: %+v", agentRows)
 	}
 	byProfile := requestJSONWithHeaders(
@@ -196,8 +290,8 @@ func TestCronTriggerRoutes(t *testing.T) {
 		http.StatusOK,
 		authHeaders(project.AdminToken),
 	)
-	profileRows := byProfile["data"].([]any)
-	if len(profileRows) != 1 || profileRows[0].(map[string]any)["id"] != triggerID {
+	profileRows := testutil.RequireType[[]any](t, byProfile["data"])
+	if len(profileRows) != 1 || testutil.RequireType[map[string]any](t, profileRows[0])["id"] != triggerID {
 		t.Fatalf("agent_profile_id filter returned wrong rows: %+v", profileRows)
 	}
 
@@ -249,7 +343,9 @@ func TestCronTriggerRoutes(t *testing.T) {
 	if updated["enabled"] != false || updated["next_fire_at"] != nil {
 		t.Fatalf("disabling should clear next_fire_at: %+v", updated)
 	}
-	if updatedTarget := updated["target"].(map[string]any); updatedTarget["agent_profile_id"] != profileID {
+	if updatedTarget := testutil.RequireType[map[string]any](
+		t, updated["target"],
+	); updatedTarget["agent_profile_id"] != profileID {
 		t.Fatalf("update must not change the target: %+v", updatedTarget)
 	}
 
@@ -346,7 +442,7 @@ func TestCronTriggerRoutes(t *testing.T) {
 		t.Fatalf("recreate after delete should mint a new trigger id")
 	}
 
-	recreatedUUID := mustPublicHTTPID(t, publicid.KindCronTrigger, recreated["id"].(string))
+	recreatedUUID := mustPublicHTTPID(t, publicid.KindCronTrigger, testutil.RequireType[string](t, recreated["id"]))
 	requestJSONWithHeaders(
 		t,
 		handler,

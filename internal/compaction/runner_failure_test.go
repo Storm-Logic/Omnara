@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/omnara-ai/omnara/internal/events"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/model/anthropicmessages"
@@ -75,8 +75,9 @@ func TestCompactionRequestPolicyDerivesPreferredAndConfiguredFloor(t *testing.T)
 			}
 			want := model.RequestPolicyFromCapabilities(test.caps)
 			want.MaxOutputTokens = test.wantOutput
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("compaction policy = %+v, want %+v", got, want)
+			want.CacheRetention = model.CacheRetentionNone
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("compaction request policy mismatch (-want +got):\n%s", diff)
 			}
 			if floor != test.wantFloor {
 				t.Fatalf("compaction output floor = %d, want %d", floor, test.wantFloor)
@@ -132,8 +133,9 @@ func TestCompactionRequestPolicyReconcilesProviderFixedReasoningBudget(t *testin
 			}
 			want := model.RequestPolicyFromCapabilities(model.CapabilitiesForClient(test.client))
 			want.MaxOutputTokens = test.wantOutput
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("compaction policy = %+v, want only output changed in %+v", got, want)
+			want.CacheRetention = model.CacheRetentionNone
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("compaction request policy mismatch (-want +got):\n%s", diff)
 			}
 			if floor != test.wantFloor {
 				t.Fatalf("compaction output floor = %d, want %d", floor, test.wantFloor)

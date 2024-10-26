@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/toolcatalog"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuiltInToolImplementationRegistryMatchesCatalog(t *testing.T) {
@@ -187,6 +189,50 @@ func TestAskQuestionImplementationValidatorBinding(t *testing.T) {
 		),
 	); err == nil {
 		t.Fatal("model-provided text capability was accepted")
+	}
+}
+
+func TestIntegrationMessageImplementationValidatorBinding(t *testing.T) {
+	artifactID, err := publicid.Encode(
+		publicid.KindArtifact,
+		integrationToolTestID("integration-message-validator"),
+	)
+	require.NoError(t, err)
+	if err := validateRegisteredToolInput(
+		"send_integration_message",
+		json.RawMessage(`{"text":"hello","artifact_ids":["`+artifactID+`"]}`),
+	); err != nil {
+		t.Fatalf("valid integration message rejected: %v", err)
+	}
+	if err := validateRegisteredToolInput(
+		"send_integration_message",
+		json.RawMessage(`{"text":"hello","artifact_ids":[]}`),
+	); err != nil {
+		t.Fatalf("empty artifact_ids rejected: %v", err)
+	}
+	if err := validateRegisteredToolInput(
+		"send_integration_message",
+		json.RawMessage(`{"text":"hello","artifact_ids":null}`),
+	); err == nil {
+		t.Fatal("null artifact_ids accepted")
+	}
+	if err := validateRegisteredToolInput(
+		"send_integration_message",
+		json.RawMessage(`{"text":"hello","artifact_ids":[""]}`),
+	); err == nil {
+		t.Fatal("empty artifact ID accepted")
+	}
+	tooManyArtifactIDs := make([]string, 21)
+	for index := range tooManyArtifactIDs {
+		tooManyArtifactIDs[index] = artifactID
+	}
+	tooManyInput, err := json.Marshal(map[string]any{
+		"text":         "hello",
+		"artifact_ids": tooManyArtifactIDs,
+	})
+	require.NoError(t, err)
+	if err := validateRegisteredToolInput("send_integration_message", tooManyInput); err == nil {
+		t.Fatal("more than 20 artifact IDs accepted")
 	}
 }
 
