@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/omnara-ai/omnara/internal/events"
@@ -46,11 +47,12 @@ type RecordToolCallSourceAndCompleteContextInput struct {
 }
 
 type boundToolCall struct {
-	ID             ID
-	ProviderCallID string
-	Name           string
-	Input          []byte
-	Type           string
+	ID               ID
+	ProviderCallID   string
+	Name             string
+	Input            []byte
+	Type             string
+	RejectionContent []byte
 }
 
 func bindToolCalls(
@@ -105,13 +107,24 @@ func bindToolCalls(
 				part.ProviderCallID,
 			)
 		}
-		toolCalls = append(toolCalls, boundToolCall{
+		call := boundToolCall{
 			ID:             binding.ID,
 			ProviderCallID: part.ProviderCallID,
 			Name:           part.ToolName,
 			Input:          part.ToolInput,
 			Type:           binding.Type,
-		})
+		}
+		if part.ToolCallError != "" {
+			content, err := marshalJSON([]map[string]any{{
+				"type":  "structured_data",
+				"value": map[string]any{"error": part.ToolCallError, "error_code": "malformed"},
+			}})
+			if err != nil {
+				return nil, fmt.Errorf("marshal rejected tool call result: %w", err)
+			}
+			call.RejectionContent = content
+		}
+		toolCalls = append(toolCalls, call)
 	}
 	if len(toolCalls) == 0 {
 		return nil, errors.New("provider response contains no tool calls")
@@ -338,6 +351,20 @@ func (s *Store) RecordToolCallSourceAndCompleteContext(
 			)
 		}
 	}
+	for index, call := range toolCalls {
+		if len(call.RejectionContent) == 0 {
+			continue
+		}
+		record, err := completeToolCallTx(ctx, txNotifications, tx, CompleteToolCallInput{
+			ProjectID: input.ProjectID, AgentID: input.AgentID, RuntimeLockID: input.RuntimeLockID,
+			ID: records[index].ID, Outcome: ToolResultOutcomeFailed,
+			ResultContentParts: call.RejectionContent,
+		})
+		if err != nil {
+			return events.Event{}, nil, fmt.Errorf("record rejected tool call: %w", err)
+		}
+		records[index] = record
+	}
 	if err := completeSuccessfulNormalModelCallTx(
 		ctx,
 		qtx,
@@ -384,6 +411,11 @@ func sameBoundToolCallBatch(
 			(!isNilID(call.ID) && record.ID != call.ID) {
 			return false
 		}
+		if len(call.RejectionContent) > 0 &&
+			(record.State != ToolCallStateCompleted || record.Outcome != ToolResultOutcomeFailed ||
+				!sameJSON(record.ResultContentParts, call.RejectionContent)) {
+			return false
+		}
 	}
 	return true
 }
@@ -407,6 +439,9 @@ func (s *Store) RecordModelOutputAndCompleteContext(
 		return events.Event{}, fmt.Errorf("begin record model output: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockAgentWithParentTx(ctx, tx, dbsqlc.New(tx), input.ProjectID, input.AgentID); err != nil {
+		return events.Event{}, err
+	}
 	if err := ensureRuntimeLockActiveTx(
 		ctx,
 		tx,
@@ -535,6 +570,14 @@ func (s *Store) RecordModelOutputAndCompleteContext(
 		); err != nil {
 			return events.Event{}, err
 		}
+		if message, ended := subagentTurnEndMessage(input.ProviderResponse); ended {
+			message.IdempotencyKey = "model_output:" + modelOutput.ID.String()
+			if err := handleSubagentTurnEndedTx(
+				ctx, txNotifications, tx, dbsqlc.New(tx), input.ProjectID, input.AgentID, message,
+			); err != nil {
+				return events.Event{}, err
+			}
+		}
 	}
 	if err := s.commitTxWithNotifications(ctx, tx, txNotifications, "record model output"); err != nil {
 		return events.Event{}, err
@@ -641,4 +684,26 @@ func completeSuccessfulNormalModelCallTx(
 		return err
 	}
 	return nil
+}
+
+// subagentTurnEndMessage decides whether a model output ends a subagent's
+// turn from the parent's point of view. Tool calls keep the turn open, and so
+// does max_tokens, because the scheduler continues that output automatically;
+// only end_turn delivers the answer, while refusal and content_filter tell the
+// parent the subagent stopped without one.
+func subagentTurnEndMessage(envelope modelenvelope.ResponseEnvelope) (subagentMessage, bool) {
+	if envelope.HasToolCalls() {
+		return subagentMessage{}, false
+	}
+	text := strings.TrimSpace(envelope.Text())
+	switch envelope.Normalized.StopReason {
+	case modelenvelope.StopReasonEndTurn:
+		return subagentMessage{Kind: SubagentMessageKindResult, Text: text}, true
+	case modelenvelope.StopReasonRefusal:
+		return subagentMessage{Kind: SubagentMessageKindRefused, Text: text}, true
+	case modelenvelope.StopReasonContentFilter:
+		return subagentMessage{Kind: SubagentMessageKindContentFiltered, Text: text}, true
+	default:
+		return subagentMessage{}, false
+	}
 }

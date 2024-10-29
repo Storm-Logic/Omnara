@@ -373,11 +373,12 @@ func TestOpenAPINamePropertiesUseExplicitContracts(t *testing.T) {
 
 	const resourceNameRef = "#/components/schemas/ResourceName"
 	exceptions := map[string]string{
-		"Agent.name":                 "#/components/schemas/AgentName",
-		"CreateAgentRequest.name":    "#/components/schemas/AgentName",
-		"Skill.name":                 "#/components/schemas/SkillName",
-		"Actor.display_name":         "",
-		"AgentInteraction.tool_name": "",
+		"Agent.name":                                     "#/components/schemas/AgentName",
+		"AgentInteraction.agent_name":                    "#/components/schemas/AgentName",
+		"CreateAgentRequest.name":                        "#/components/schemas/AgentName",
+		"Skill.name":                                     "#/components/schemas/SkillName",
+		"Actor.display_name":                             "",
+		"AgentInteraction.tool_name":                     "",
 		"CreateMachinePoolRequestBase.provider_config":   "",
 		"CreateSlackSetupRequest.app_name":               "",
 		"CurrentUserIdentity.display_name":               "",
@@ -853,6 +854,20 @@ func TestOpenAPIRequestValidatorEnforcesMachinePoolProviderShape(t *testing.T) {
 		{
 			name: "unikraft missing cpu",
 			body: `{"provider":"unikraft",` + common + `}`,
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "modal",
+			body: `{"provider":"modal",` + common +
+				`,"default_machine_cpu":1,"default_machine_memory_mb":1024,` +
+				`"max_total_cpu":4,"max_total_memory_mb":8192,"max_machine_cpu":2,"max_machine_memory_mb":4096}`,
+			want: http.StatusNoContent,
+		},
+		{
+			name: "modal missing memory",
+			body: `{"provider":"modal",` + common +
+				`,"default_machine_cpu":1,"max_total_cpu":4,"max_total_memory_mb":8192,` +
+				`"max_machine_cpu":2,"max_machine_memory_mb":4096}`,
 			want: http.StatusBadRequest,
 		},
 		{

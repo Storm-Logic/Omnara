@@ -176,7 +176,13 @@ export const zModelApiFormat = z.enum([
     'anthropic-messages'
 ]);
 
-export const zModelProviderAuthKind = z.enum(['bearer_token', 'api_key_header']);
+export const zModelProviderAuthKind = z.enum([
+    'bearer_token',
+    'api_key_header',
+    'sigv4'
+]);
+
+export const zModelProviderAuthKindResponse = z.string();
 
 export const zModelProviderApiVariant = z.enum([
     'default',
@@ -239,7 +245,7 @@ export const zUpdateConfiguredModelRequest = z.object({
     name: zResourceName.optional(),
     provider_model_slug: z.string().min(1).optional(),
     context_window_tokens: z.int().gte(2).lte(2147483647).optional(),
-    max_output_tokens: z.int().gte(1).lte(2147483647).optional(),
+    max_output_tokens: z.int().gte(1).lte(2147483647).nullish(),
     default_max_output_tokens: z.int().gte(1).lte(2147483647).nullish(),
     default_cache_retention: zModelCacheRetention.optional(),
     supports_tools: z.boolean().optional(),
@@ -317,9 +323,12 @@ export const zCreateModelProviderConfigRequest = z.object({
     base_url: z.string().min(1).optional(),
     endpoint_path: z.string().min(1).regex(/^\//).optional(),
     request_timeout_ms: z.int().gte(1).lte(2147483647).optional(),
+    idle_timeout_ms: z.int().gte(1).lte(2147483647).optional(),
     auth_kind: zModelProviderAuthKind.optional(),
     auth_options: z.object({
-        header_name: z.string().min(1).optional()
+        header_name: z.string().min(1).optional(),
+        service: z.string().min(1).max(64).optional(),
+        region: z.string().min(1).max(64).optional()
     }).optional(),
     credential_secret_id: zSecretId
 });
@@ -331,9 +340,12 @@ export const zUpdateModelProviderConfigRequest = z.object({
     base_url: z.string().min(1).optional(),
     endpoint_path: z.string().min(1).regex(/^\//).optional(),
     request_timeout_ms: z.int().gte(1).lte(2147483647).optional(),
+    idle_timeout_ms: z.int().gte(1).lte(2147483647).optional(),
     auth_kind: zModelProviderAuthKind.optional(),
     auth_options: z.object({
-        header_name: z.string().min(1).optional()
+        header_name: z.string().min(1).optional(),
+        service: z.string().min(1).max(64).optional(),
+        region: z.string().min(1).max(64).optional()
     }).optional(),
     credential_secret_id: zSecretId.optional()
 });
@@ -362,9 +374,12 @@ export const zModelProviderConfig = z.object({
     base_url: z.string(),
     endpoint_path: z.string(),
     request_timeout_ms: z.int(),
-    auth_kind: zModelProviderAuthKind,
+    idle_timeout_ms: z.int(),
+    auth_kind: zModelProviderAuthKindResponse,
     auth_options: z.object({
-        header_name: z.string().min(1).optional()
+        header_name: z.string().min(1).optional(),
+        service: z.string().min(1).max(64).optional(),
+        region: z.string().min(1).max(64).optional()
     }),
     credential_secret_id: zSecretId,
     created_at: zTimestamp,
@@ -390,7 +405,7 @@ export const zConfiguredModel = z.object({
     current_revision_id: zConfiguredModelRevisionId,
     provider_model_slug: z.string(),
     context_window_tokens: z.int(),
-    max_output_tokens: z.int(),
+    max_output_tokens: z.int().nullable(),
     default_max_output_tokens: z.int().nullish(),
     default_cache_retention: zModelCacheRetention.optional(),
     supports_tools: z.boolean(),
@@ -816,7 +831,7 @@ export const zAgentConfigModel = z.object({
     api_format: zModelApiFormat,
     api_variant: zModelProviderApiVariantResponse,
     context_window_tokens: z.int(),
-    max_output_tokens: z.int(),
+    max_output_tokens: z.int().nullable(),
     default_max_output_tokens: z.int().nullish(),
     default_cache_retention: zModelCacheRetention,
     supports_tools: z.boolean(),
@@ -961,6 +976,16 @@ export const zCreateAgentRequest = z.object({
     message: z.string().optional()
 });
 
+export const zAgentActivity = z.object({
+    state: z.enum([
+        'running',
+        'idle',
+        'waiting_on_interaction',
+        'archived'
+    ]),
+    last_activity_at: zTimestamp
+});
+
 export const zAgentModel = z.object({
     provider_config: zResourceName,
     name: zResourceName
@@ -984,6 +1009,9 @@ export const zAgent = z.object({
     integration_target: zIntegrationTarget.optional(),
     current_config_id: zAgentConfigId.optional(),
     model: zAgentModel.optional(),
+    parent_agent_id: zAgentId.optional(),
+    subagent_key: z.string().optional(),
+    activity: zAgentActivity.optional(),
     created_at: zTimestamp,
     updated_at: zTimestamp,
     archived_at: zTimestamp.optional()
@@ -1309,6 +1337,7 @@ export const zToolCallOutcome = z.enum([
  */
 export const zToolCall = z.object({
     id: zToolCallId,
+    agent_id: zAgentId,
     turn_id: zAgentTurnId,
     provider_call_id: z.string(),
     name: z.string(),
@@ -1321,10 +1350,11 @@ export const zToolCall = z.object({
 });
 
 /**
- * An ephemeral notification that a tool call entered a lifecycle state.
+ * An ephemeral notification that a tool call entered a lifecycle state. Sent for the streamed agent and for every subagent beneath it, so questions, permission requests, and custom tool calls anywhere in the tree surface here; query the list endpoints with `include_subagents` for the current rows.
  */
 export const zToolCallUpdate = z.object({
     tool_call_id: zToolCallId,
+    agent_id: zAgentId.optional(),
     state: zToolCallState
 });
 
@@ -1641,6 +1671,8 @@ export const zAgentInteraction = z.object({
     agent_id: zAgentId,
     tool_call_id: zToolCallId,
     tool_name: z.string().optional(),
+    agent_name: zAgentName.optional(),
+    subagent_key: z.string().optional(),
     interaction_kind: zAgentInteractionKind,
     state: zAgentInteractionState,
     request: zInteractionForm,
@@ -2009,7 +2041,7 @@ export const zCreateMachinePoolRequestBase = z.object({
 
 export const zCreateMachinePoolRequest = zCreateMachinePoolRequestBase.and(z.union([
     z.object({
-        provider: z.enum(['unikraft']),
+        provider: z.enum(['unikraft', 'modal']),
         default_machine_cpu: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
         default_machine_memory_mb: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
         max_total_cpu: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
@@ -2556,6 +2588,10 @@ export const zCurrentUserOrg = z.object({
     created_at: zTimestamp
 });
 
+export const zListOrganizationsResponse = z.object({
+    data: z.array(zCurrentUserOrg)
+});
+
 export const zCurrentUser = z.object({
     user: zCurrentUserIdentity,
     orgs: z.array(zCurrentUserOrg)
@@ -2737,6 +2773,11 @@ export const zRecordMachineFailureQuery = z.object({
  * Machine failure recorded.
  */
 export const zRecordMachineFailureResponse = z.void();
+
+/**
+ * Organizations the authenticated principal belongs to, with its role in each.
+ */
+export const zListOrganizationsResponse2 = zListOrganizationsResponse;
 
 export const zCreateOrganizationBody = zCreateOrganizationRequest;
 
@@ -3572,13 +3613,16 @@ export const zListAgentsPath = z.object({
 export const zListAgentsQuery = z.object({
     name: z.string().min(1).max(200).optional(),
     agent_profile_id: zAgentProfileId.optional(),
+    parent_agent_id: zAgentId.optional(),
+    include_subagents: z.boolean().optional(),
+    include_archived: z.boolean().optional(),
     sort: zResourceListSort.optional(),
     limit: z.int().gte(1).lte(100).optional().default(50),
     cursor: z.string().max(1024).optional()
 });
 
 /**
- * Active agents in the project, newest first.
+ * Agents in the project, newest first.
  */
 export const zListAgentsResponse2 = zListAgentsResponse;
 
@@ -3663,6 +3707,7 @@ export const zListToolCallsPath = z.object({
 export const zListToolCallsQuery = z.object({
     state: zToolCallState.optional(),
     type: zToolCallType.optional(),
+    include_subagents: z.boolean().optional(),
     limit: z.int().gte(1).lte(100).optional().default(50),
     cursor: z.string().max(1024).optional()
 });
@@ -3752,7 +3797,7 @@ export const zStreamEventsQuery = z.object({
 });
 
 /**
- * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort tool lifecycle updates use `tool_call_update`, model previews use `model_output_delta`, and stream-closing errors use `error`; none carries an SSE `id`, so reconnects resume from the last durable event. The response closes after every `error` frame. Raw clients reconnect when the error's stable code is `service_unavailable` and treat other current codes as terminal. Heartbeats are SSE comments and carry no JSON payload.
+ * Server-sent event stream. Durable frames use `agent_input`, `model_output`, `tool_result`, or `context_checkpoint` as the SSE event name and set the SSE `id` field to the event's `sequence`, which reconnects can replay via `Last-Event-ID`. Best-effort tool lifecycle updates use `tool_call_update` and cover this agent and every subagent beneath it, model previews use `model_output_delta`, and stream-closing errors use `error`; none carries an SSE `id`, so reconnects resume from the last durable event. The response closes after every `error` frame. Raw clients reconnect when the error's stable code is `service_unavailable` and treat other current codes as terminal. Heartbeats are SSE comments and carry no JSON payload.
  */
 export const zStreamEventsResponse = zAgentEventStreamData;
 
@@ -3777,6 +3822,7 @@ export const zListAgentInteractionsPath = z.object({
 
 export const zListAgentInteractionsQuery = z.object({
     state: zAgentInteractionState.optional(),
+    include_subagents: z.boolean().optional(),
     limit: z.int().gte(1).lte(100).optional().default(50),
     cursor: z.string().max(1024).optional()
 });
@@ -4129,7 +4175,7 @@ export const zCreateModelProviderConfigPath = z.object({
 });
 
 /**
- * Route response.
+ * Created route response.
  */
 export const zCreateModelProviderConfigResponse2 = zCreateModelProviderConfigResponse;
 
@@ -4198,7 +4244,7 @@ export const zCreateConfiguredModelPath = z.object({
 });
 
 /**
- * Route response.
+ * Created route response.
  */
 export const zCreateConfiguredModelResponse = zConfiguredModel;
 
@@ -4251,7 +4297,7 @@ export const zCreateProjectModelGrantPath = z.object({
 });
 
 /**
- * Route response.
+ * Created route response.
  */
 export const zCreateProjectModelGrantResponse = zProjectModelGrantEnvelope;
 

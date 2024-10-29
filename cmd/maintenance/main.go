@@ -140,6 +140,11 @@ func main() {
 		defer close(machineLoopDone)
 		runMachinePoolMaintenanceLoop(ctx, logger, machinePoolManager, cfg.MaintenanceInterval)
 	}()
+	idleAgentArchiveLoopDone := make(chan struct{})
+	go func() {
+		defer close(idleAgentArchiveLoopDone)
+		runIdleAgentArchiveLoop(ctx, logger, store, machinePoolManager, cfg.MaintenanceInterval)
+	}()
 	runtimeDiscoveryDone := make(chan struct{})
 	go func() {
 		defer close(runtimeDiscoveryDone)
@@ -213,6 +218,7 @@ func main() {
 	)
 	cancel()
 	<-machineLoopDone
+	<-idleAgentArchiveLoopDone
 	<-runtimeDiscoveryDone
 	<-runtimeRecheckDone
 	<-defaultModelProviderDone
@@ -375,21 +381,23 @@ func runCoreMaintenanceTick(
 	if expireDaemonRuntimesErr == nil {
 		expiredDaemonRuntimes = len(records)
 	}
-	expiredUnreachableTools, expireUnreachableToolsErr :=
-		store.Execution().ExpireMachineUnreachableProcessToolCallsForAllProjects(
+	expiredProcessTools, expireProcessToolsErr :=
+		store.Execution().ExpireProcessToolCallsForAllProjects(
 			ctx,
 			executionstore.ProcessToolMachineUnreachableGrace,
 		)
-	expireUnreachableToolsOutcome := completedMaintenanceOutcome(ctx, expireUnreachableToolsErr)
+	expireProcessToolsOutcome := completedMaintenanceOutcome(ctx, expireProcessToolsErr)
 	authCleanup, authCleanupErr := store.Identity().CleanupInactiveAuthState(ctx)
 	authCleanupOutcome := completedMaintenanceOutcome(ctx, authCleanupErr)
 	authCleanupDeleted := authCleanup.DeletedInactiveTokens > 0 ||
 		authCleanup.DeletedBrowserSessions > 0 ||
 		authCleanup.DeletedAbandonedUsers > 0 ||
-		authCleanup.DeletedDeviceFlows > 0
+		authCleanup.DeletedDeviceFlows > 0 ||
+		authCleanup.DeletedOAuthCodes > 0 ||
+		authCleanup.DeletedOAuthTokens > 0
 	worked := reapedRuntimeLocks > 0 ||
 		expiredDaemonRuntimes > 0 ||
-		expiredUnreachableTools > 0 ||
+		expiredProcessTools > 0 ||
 		authCleanupDeleted
 	logent.MaintenanceLoopResult(
 		ctx,
@@ -399,7 +407,7 @@ func runCoreMaintenanceTick(
 		errors.Join(
 			reapRuntimeLocksOutcome.err,
 			expireDaemonRuntimesOutcome.err,
-			expireUnreachableToolsOutcome.err,
+			expireProcessToolsOutcome.err,
 			authCleanupOutcome.err,
 		),
 	)
@@ -408,10 +416,10 @@ func runCoreMaintenanceTick(
 	} else if !expireDaemonRuntimesOutcome.interrupted && expiredDaemonRuntimes > 0 {
 		log.Info("expired daemon runtimes", "count", expiredDaemonRuntimes)
 	}
-	if expireUnreachableToolsOutcome.err != nil {
-		log.Error("expire machine-unreachable process tool calls", "error", expireUnreachableToolsOutcome.err)
-	} else if !expireUnreachableToolsOutcome.interrupted && expiredUnreachableTools > 0 {
-		log.Info("expired machine-unreachable process tool calls", "count", expiredUnreachableTools)
+	if expireProcessToolsOutcome.err != nil {
+		log.Error("expire process tool calls", "error", expireProcessToolsOutcome.err)
+	} else if !expireProcessToolsOutcome.interrupted && expiredProcessTools > 0 {
+		log.Info("expired process tool calls", "count", expiredProcessTools)
 	}
 	if authCleanupOutcome.err != nil {
 		log.Error("cleanup inactive auth state", "error", authCleanupOutcome.err)
@@ -426,6 +434,10 @@ func runCoreMaintenanceTick(
 			authCleanup.DeletedAbandonedUsers,
 			"deleted_device_flows",
 			authCleanup.DeletedDeviceFlows,
+			"deleted_oauth_codes",
+			authCleanup.DeletedOAuthCodes,
+			"deleted_oauth_tokens",
+			authCleanup.DeletedOAuthTokens,
 		)
 	}
 }
@@ -505,5 +517,46 @@ func runMachinePoolMaintenanceTick(
 		log.Error("reconcile machine cleanup", "attempted_count", cleaned, "error", cleanupOutcome.err)
 	} else if !cleanupOutcome.interrupted && cleaned > 0 {
 		log.Info("attempted machine cleanup reconcile", "attempted_count", cleaned)
+	}
+}
+
+func runIdleAgentArchiveLoop(
+	ctx context.Context,
+	log *slog.Logger,
+	store *storage.Store,
+	machinePoolManager *machinepool.Manager,
+	interval time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		runIdleAgentArchiveTick(ctx, log, store, machinePoolManager)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func runIdleAgentArchiveTick(
+	ctx context.Context,
+	log *slog.Logger,
+	store *storage.Store,
+	machinePoolManager *machinepool.Manager,
+) {
+	defer recoverMachinePoolMaintenancePanic(log)
+	machines, archived, err := store.Execution().ArchiveIdleAgents(ctx, machinepool.DefaultReconcileBatchSize)
+	outcome := completedMaintenanceOutcome(ctx, err)
+	if outcome.err != nil {
+		log.Error("archive idle agents", "archived_count", archived, "error", outcome.err)
+	} else if !outcome.interrupted && archived > 0 {
+		log.Info("archived idle agents", "archived_count", archived)
+	}
+	if len(machines) == 0 {
+		return
+	}
+	if _, err := machinePoolManager.DeleteMachines(ctx, machines); err != nil {
+		log.Error("delete idle agent machines", "machine_count", len(machines), "error", err)
 	}
 }
