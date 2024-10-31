@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
@@ -35,12 +34,8 @@ func testQueries(store *Store) *dbsqlc.Queries {
 	return dbsqlc.New(store.pool)
 }
 
-func testID(seed string) ID {
+func testID(seed string) uuid.UUID {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("omnara-storage-integration:"+seed))
-}
-
-func isNilID(id ID) bool {
-	return id == NilID
 }
 
 func openIntegrationDB(t *testing.T, ctx context.Context) *pgxpool.Pool {
@@ -52,7 +47,7 @@ func recordPoolMachineProvisioningResourceForTest(
 	t *testing.T,
 	ctx context.Context,
 	store *Store,
-	machineID ID,
+	machineID uuid.UUID,
 	provisionAttempt int32,
 	providerResourceID string,
 ) {
@@ -81,7 +76,7 @@ func countProjectMachineGrantsForMachineForTest(
 	t *testing.T,
 	ctx context.Context,
 	store *Store,
-	orgID, projectID, machineID ID,
+	orgID, projectID, machineID uuid.UUID,
 ) int {
 	t.Helper()
 	var count int
@@ -111,7 +106,7 @@ func seedAdditionalProjectForTest(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	seed string,
-) ID {
+) uuid.UUID {
 	t.Helper()
 	projectID := testID("project_" + seed)
 	storagefixture.InsertProject(t, ctx, pool, testOrgID, projectID,
@@ -119,7 +114,7 @@ func seedAdditionalProjectForTest(
 	return projectID
 }
 
-func testDefaultProviderConfigID() ID {
+func testDefaultProviderConfigID() uuid.UUID {
 	return testID("default_provider_config")
 }
 
@@ -133,19 +128,15 @@ func ensureTestConfiguredModelForSource(
 	return storagefixture.SeedModelForAgentYAML(t, ctx, store.Models(), testOrgID, testProjectID, sourceYAML)
 }
 
-func parseConfiguredModelID(t *testing.T, compiled agentconfig.Result) ID {
+func parseConfiguredModelID(t *testing.T, compiled agentconfig.Result) uuid.UUID {
 	t.Helper()
-	id, err := ParseID(compiled.Compiled.Model.ConfiguredModelID)
-	if err != nil {
-		t.Fatalf("parse compiled configured model id: %v", err)
-	}
-	return id
+	return compiled.Compiled.Model.ConfiguredModelID
 }
 
 func resolvedTestModelSelection(configuredModel modelstore.ConfiguredModelRecord) agentconfig.ResolvedModelSelection {
 	supportsTools := configuredModel.SupportsTools
 	return agentconfig.ResolvedModelSelection{
-		ConfiguredModelID: configuredModel.ID.String(),
+		ConfiguredModelID: configuredModel.ID,
 		SupportsTools:     &supportsTools,
 	}
 }
@@ -212,7 +203,7 @@ func assertMachineAllowed(
 	ctx context.Context,
 	store *Store,
 	principal identitystore.PrincipalRecord,
-	machineID ID,
+	machineID uuid.UUID,
 	action string,
 	want bool,
 ) {
@@ -231,7 +222,7 @@ func assertMachineAllowed(
 	}
 }
 
-func mustCreateAgent(t *testing.T, ctx context.Context, store *Store) ID {
+func mustCreateAgent(t *testing.T, ctx context.Context, store *Store) uuid.UUID {
 	t.Helper()
 	configID := mustCreateAgentConfig(t, ctx, store, testProjectID)
 	agent, err := store.Execution().CreateAgentFixture(ctx, executionstore.AgentFixtureInput{
@@ -248,8 +239,8 @@ func mustCreateAgentConfig(
 	t *testing.T,
 	ctx context.Context,
 	store *Store,
-	projectID ID,
-) ID {
+	projectID uuid.UUID,
+) uuid.UUID {
 	t.Helper()
 	config := storagefixture.SeedAgentConfig(
 		t, ctx, store.Models(), store.Execution(), testOrgID, projectID, testAgentConfigYAML(),
@@ -356,15 +347,6 @@ func defaultMachinePoolTemplateWithDefaultMachineForTest(
 	return template
 }
 
-func secretPublicIDForTest(t *testing.T, id ID) string {
-	t.Helper()
-	encoded, err := publicid.Encode(publicid.KindSecret, id)
-	if err != nil {
-		t.Fatalf("encode secret public id: %v", err)
-	}
-	return encoded
-}
-
 func completeMachinePoolCreateInputForTest(
 	t *testing.T,
 	ctx context.Context,
@@ -373,7 +355,7 @@ func completeMachinePoolCreateInputForTest(
 ) executionstore.CreateMachinePoolInput {
 	t.Helper()
 	input = completeMachinePoolInputForTest(input)
-	if input.ManagementKind != management.Cluster && isNilID(input.ProviderAuthSecretID) {
+	if input.ManagementKind != management.Cluster && input.ProviderAuthSecretID == uuid.Nil {
 		input.ProviderAuthSecretID = createMachinePoolProviderAuthSecretForTest(
 			t,
 			ctx,
@@ -389,9 +371,9 @@ func createMachinePoolProviderAuthSecretForTest(
 	ctx context.Context,
 	store *Store,
 	value string,
-) ID {
+) uuid.UUID {
 	t.Helper()
-	suffix, err := newSecretUUID()
+	suffix, err := uuid.NewV7()
 	if err != nil {
 		t.Fatalf("generate machine pool provider auth secret suffix: %v", err)
 	}
@@ -498,11 +480,9 @@ func mustCreateAgentConfigFromYAML(
 func changeInputFromRecord(record executionstore.AgentConfigRecord) executionstore.CreateAgentConfigInput {
 	return executionstore.CreateAgentConfigInput{
 		ProjectID:               record.ProjectID,
-		Definition:              record.Definition,
 		Source:                  record.Source,
 		ConfiguredModelID:       record.ConfiguredModelID,
 		CompiledDefinition:      record.CompiledDefinition,
-		CompilerVersion:         record.CompilerVersion,
 		EffectiveDefinitionHash: record.EffectiveDefinitionHash,
 	}
 }

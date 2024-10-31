@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/secrets"
+	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
@@ -21,6 +23,8 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
 	"github.com/omnara-ai/omnara/internal/testutil/storagefixture"
+	"github.com/omnara-ai/omnara/internal/testutil/storagetest"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAgentLaunchRequiresConfigAndCanRecordProfile(t *testing.T) {
@@ -32,7 +36,7 @@ func TestAgentLaunchRequiresConfigAndCanRecordProfile(t *testing.T) {
 	store := newIntegrationStore(pool)
 	user, err := store.Identity().CreateVerifiedUser(
 		ctx,
-		CreateVerifiedUserInput{Email: "agent-profile-launch@example.com", DisplayName: "Agent Profile Launch"},
+		storagetest.CreateVerifiedUserInput{Email: "agent-profile-launch@example.com", DisplayName: "Agent Profile Launch"},
 	)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -114,7 +118,7 @@ model:
 	if configOnly.Agent.CurrentConfigID != profile.CurrentConfigID {
 		t.Fatalf("config-only launch current config = %s, want %s", configOnly.Agent.CurrentConfigID, profile.CurrentConfigID)
 	}
-	if configOnly.Agent.AgentProfileID != executionstore.NilID {
+	if configOnly.Agent.AgentProfileID != uuid.Nil {
 		t.Fatalf("config-only launch profile = %s, want nil", configOnly.Agent.AgentProfileID)
 	}
 	if _, err := store.Execution().LaunchAgent(ctx, executionstore.LaunchAgentInput{
@@ -177,7 +181,7 @@ func TestSystemConfigChangeHasNoActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list read events: %v", err)
 	}
-	if len(readEvents) != 1 || readEvents[0].ActorID != NilID {
+	if len(readEvents) != 1 || readEvents[0].ActorID != uuid.Nil {
 		t.Fatalf("system config_change read record = %+v, want actorless", readEvents)
 	}
 }
@@ -219,7 +223,7 @@ func TestAgentIdentityIsImmutable(t *testing.T) {
 		}
 	}
 
-	var retainedID, retainedOrgID, retainedProjectID ID
+	var retainedID, retainedOrgID, retainedProjectID uuid.UUID
 	if err := pool.QueryRow(
 		ctx,
 		`SELECT id, org_id, project_id FROM agents WHERE id = $1`,
@@ -331,7 +335,7 @@ model:
 	if err != nil {
 		t.Fatalf("create other profile: %v", err)
 	}
-	var currentVersionID, otherVersionID ID
+	var currentVersionID, otherVersionID uuid.UUID
 	if err := pool.QueryRow(
 		ctx,
 		`SELECT current_version_id FROM agent_profiles WHERE project_id = $1 AND id = $2`,
@@ -889,11 +893,9 @@ model:
 	change, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
 		CreateAgentConfigInput: executionstore.CreateAgentConfigInput{
 			ProjectID:               testProjectID,
-			Definition:              json.RawMessage(compiled.CanonicalJSON),
 			Source:                  updatedYAML,
 			ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 			CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: compiled.Hash,
 		},
 		AgentID:        launch.Agent.ID,
@@ -951,11 +953,9 @@ model:
 	secondChange, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
 		CreateAgentConfigInput: executionstore.CreateAgentConfigInput{
 			ProjectID:               testProjectID,
-			Definition:              json.RawMessage(secondCompiled.CanonicalJSON),
 			Source:                  secondYAML,
 			ConfiguredModelID:       parseConfiguredModelID(t, secondCompiled),
 			CompiledDefinition:      json.RawMessage(secondCompiled.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: secondCompiled.Hash,
 		},
 		AgentID:        launch.Agent.ID,
@@ -1053,11 +1053,9 @@ model:
 	compiled := mustCompileAgentYAMLResolved(t, ctx, store, updatedYAML)
 	updatedInput := executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  updatedYAML,
 		ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	}
 	change, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
@@ -1082,11 +1080,9 @@ model:
 	if _, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
 		CreateAgentConfigInput: executionstore.CreateAgentConfigInput{
 			ProjectID:               testProjectID,
-			Definition:              json.RawMessage(staleCompiled.CanonicalJSON),
 			Source:                  staleYAML,
 			ConfiguredModelID:       parseConfiguredModelID(t, staleCompiled),
 			CompiledDefinition:      json.RawMessage(staleCompiled.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: staleCompiled.Hash,
 		},
 		AgentID:                 launch.Agent.ID,
@@ -1126,7 +1122,7 @@ func TestCaptureAgentConfigForModelContextSeesEventsCommittedBeforeLock(t *testi
 	now := time.Date(2026, 4, 29, 16, 20, 0, 0, time.UTC)
 	user, err := store.Identity().CreateVerifiedUser(
 		ctx,
-		CreateVerifiedUserInput{Email: "agent-config-capture@example.com", DisplayName: "Agent Config Capture"},
+		storagetest.CreateVerifiedUserInput{Email: "agent-config-capture@example.com", DisplayName: "Agent Config Capture"},
 	)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -1157,7 +1153,7 @@ model:
 		t.Fatalf("begin lock tx: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var locked ID
+	var locked uuid.UUID
 	if err := tx.QueryRow(ctx, `
 SELECT id
 FROM agents
@@ -1197,7 +1193,7 @@ WHERE project_id = $1 AND id = $2
 		t.Fatalf("read locked agent sequence: %v", err)
 	}
 	eventAt := now.Add(2 * time.Second)
-	var inputID ID
+	var inputID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 INSERT INTO agent_inputs(
 	id, project_id, agent_id, state, input_rank, actor_id,
@@ -1207,11 +1203,11 @@ VALUES (uuidv7(), $1, $2, 'received', 1024, $3, 'content', 'queued', $4, '{}'::j
 RETURNING id`, testProjectID, launch.Agent.ID, actorID, eventAt).Scan(&inputID); err != nil {
 		t.Fatalf("insert blocked input: %v", err)
 	}
-	var turnID ID
+	var turnID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT uuidv7()`).Scan(&turnID); err != nil {
 		t.Fatalf("generate blocked turn id: %v", err)
 	}
-	var eventID ID
+	var eventID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 INSERT INTO agent_events(id, agent_id, turn_id, sequence, event_kind, idempotency_key, agent_input_id,
     is_opening_event, created_at)
@@ -1392,11 +1388,9 @@ mcp:
 	changed, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
 		CreateAgentConfigInput: executionstore.CreateAgentConfigInput{
 			ProjectID:               testProjectID,
-			Definition:              json.RawMessage(compiled.CanonicalJSON),
 			Source:                  yaml,
 			ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 			CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: compiled.Hash,
 		},
 		AgentID:        launch.Agent.ID,
@@ -1424,7 +1418,6 @@ mcp:
 	}
 	contract, err := agentconfig.RuntimeContractFromCompiled(
 		currentConfig.CompiledDefinition,
-		currentConfig.CompilerVersion,
 		currentConfig.EffectiveDefinitionHash,
 	)
 	if err != nil {
@@ -1442,7 +1435,7 @@ func TestChangeAgentConfigReconcilesExplicitMachineSources(t *testing.T) {
 	pool := openIntegrationDB(t, ctx)
 	seedMigratedDB(t, ctx, pool)
 	publisher := &recordingPostCommitPublisher{}
-	store := newIntegrationStore(pool, WithPostCommitPublisher(publisher))
+	store := newIntegrationStore(pool, storage.WithPostCommitPublisher(publisher))
 	now := time.Date(2026, 4, 29, 16, 35, 0, 0, time.UTC)
 	user := mustCreateProjectDeveloperUser(t, ctx, store, "agent-config-machines@example.com", "Agent Config Machines")
 	secret, _, err := store.Secrets().CreateSecret(ctx, secretstore.CreateSecretInput{
@@ -1546,7 +1539,6 @@ tools:
 		ctx,
 		testProjectID,
 		invalidConfig.CompiledDefinition,
-		invalidConfig.CompilerVersion,
 		invalidConfig.EffectiveDefinitionHash,
 	); err == nil || !strings.Contains(err.Error(), "env and secret_env cannot both set key BASE") {
 		t.Fatalf("invalid machine source validation error = %v", err)
@@ -1618,7 +1610,7 @@ tools:
 	if len(changed.DeleteMachines) != 0 {
 		t.Fatalf("explicit change deleted machines: %+v", changed.DeleteMachines)
 	}
-	bindingForMachine := func(machineID ID) executionstore.AgentMachineBindingRecord {
+	bindingForMachine := func(machineID uuid.UUID) executionstore.AgentMachineBindingRecord {
 		t.Helper()
 		row, err := store.q.GetAgentMachineBindingByMachine(ctx, dbsqlc.GetAgentMachineBindingByMachineParams{
 			ProjectID:   testProjectID,
@@ -1650,7 +1642,7 @@ tools:
 		t.Fatalf("reconciled bindings = first %+v second %+v", firstBinding, secondBinding)
 	}
 	if !sameJSON(firstBinding.EnvOverlay, json.RawMessage(`{"APP":"changed","Base":null,"UNUSED":null}`)) ||
-		!sameJSON(firstBinding.SecretEnvOverlay, json.RawMessage(`{"BASE":"`+secretPublicIDForTest(t, secret.ID)+`"}`)) {
+		!sameJSON(firstBinding.SecretEnvOverlay, json.RawMessage(`{"BASE":"`+secret.ID.String()+`"}`)) {
 		t.Fatalf("reconciled first binding environment = %s / %s", firstBinding.EnvOverlay, firstBinding.SecretEnvOverlay)
 	}
 	reorderedYAML := `
@@ -1730,7 +1722,7 @@ tools:
 	}
 	startRunningProcess := func(
 		testName string,
-		agentID, bindingID ID,
+		agentID, bindingID uuid.UUID,
 		lock executionstore.AgentRuntimeLockRecord,
 	) executionstore.ProcessRecord {
 		t.Helper()
@@ -1860,7 +1852,7 @@ tools:
 		"idem-live-explicit-readd",
 	)
 	rebound := bindingForMachine(firstMachine.ID)
-	if rebound.ID == firstBinding.ID || rebound.MachineRef == firstBinding.MachineRef {
+	if rebound.ID == firstBinding.ID || rebound.MachineID != firstBinding.MachineID {
 		t.Fatalf("re-added explicit source reused binding history: old=%+v new=%+v", firstBinding, rebound)
 	}
 	assertCurrentAgentReplay("after reattachment")
@@ -1924,11 +1916,9 @@ instruction: test
 	equivalentModelID := parseConfiguredModelID(t, compiledA)
 	equivalentA, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiledA.CanonicalJSON),
 		Source:                  sourceA,
 		ConfiguredModelID:       equivalentModelID,
 		CompiledDefinition:      json.RawMessage(compiledA.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiledA.Hash,
 	})
 	if err != nil {
@@ -1936,11 +1926,9 @@ instruction: test
 	}
 	equivalentB, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiledB.CanonicalJSON),
 		Source:                  sourceB,
 		ConfiguredModelID:       equivalentModelID,
 		CompiledDefinition:      json.RawMessage(compiledB.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiledB.Hash,
 	})
 	if err != nil {
@@ -1958,11 +1946,9 @@ instruction: test
 	}
 	replayedA, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiledA.CanonicalJSON),
 		Source:                  sourceA,
 		ConfiguredModelID:       equivalentModelID,
 		CompiledDefinition:      json.RawMessage(compiledA.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiledA.Hash,
 	})
 	if err != nil {
@@ -2033,11 +2019,9 @@ func mustCompileAgentYAMLWithMachineSourceResolvers(
 func changeInputFromRecord(record executionstore.AgentConfigRecord) executionstore.CreateAgentConfigInput {
 	return executionstore.CreateAgentConfigInput{
 		ProjectID:               record.ProjectID,
-		Definition:              record.Definition,
 		Source:                  record.Source,
 		ConfiguredModelID:       record.ConfiguredModelID,
 		CompiledDefinition:      record.CompiledDefinition,
-		CompilerVersion:         record.CompilerVersion,
 		EffectiveDefinitionHash: record.EffectiveDefinitionHash,
 	}
 }
@@ -2046,7 +2030,7 @@ func changeAgentConfigFromYAMLForTest(
 	t *testing.T,
 	ctx context.Context,
 	store *Store,
-	agentID, actorID ID,
+	agentID, actorID uuid.UUID,
 	key, sourceYAML, idempotencyKey string,
 ) executionstore.ChangeAgentConfigResult {
 	t.Helper()
@@ -2062,4 +2046,46 @@ func changeAgentConfigFromYAMLForTest(
 		t.Fatalf("change agent config %s: %v", key, err)
 	}
 	return result
+}
+
+func TestEventWebhookTargetFollowsCurrentConfig(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	pool := openIntegrationDB(t, ctx)
+	seedMigratedDB(t, ctx, pool)
+	store := newIntegrationStore(pool)
+	user := mustCreateProjectDeveloperUser(t, ctx, store, "event-webhook@example.com", "Event webhook")
+	source := "instruction: Test event webhook.\nmodel:\n  provider_config: openai-prod\n  name: event-webhook\n"
+	profile := mustCreateConfigAndProfileBookmarkFromYAML(t, ctx, store, "event-webhook", "Event webhook", source)
+	launch, err := store.Execution().LaunchAgent(ctx, executionstore.LaunchAgentInput{
+		ProjectID: testProjectID, ProfileID: profile.ID, AgentConfigID: profile.CurrentConfigID,
+		LaunchedBy: userPrincipal(user.ID), IdempotencyKey: "event-webhook-launch",
+	})
+	require.NoError(t, err)
+	target, err := store.Execution().GetAgentEventWebhookTarget(ctx, launch.Agent.ID)
+	require.NoError(t, err)
+	require.Empty(t, target.URL)
+	for _, destination := range []string{"https://example.com/first", "https://example.com/second", ""} {
+		updated := source
+		if destination != "" {
+			updated += "event_webhook:\n  url: " + destination + "\n  events: [tool_call_update]\n"
+		}
+		compiled := mustCompileAgentYAMLResolved(t, ctx, store, updated)
+		_, err := store.Execution().ChangeAgentConfig(ctx, executionstore.ChangeAgentConfigInput{
+			CreateAgentConfigInput: executionstore.CreateAgentConfigInput{
+				ProjectID: testProjectID, Source: updated, SourceFormat: "yaml",
+				ConfiguredModelID: parseConfiguredModelID(t, compiled), CompiledDefinition: compiled.CanonicalJSON,
+				EffectiveDefinitionHash: compiled.Hash,
+			},
+			AgentID: launch.Agent.ID, ActorType: identitystore.PrincipalTypeUser, ActorID: user.ID, Reason: "user_update",
+		})
+		require.NoError(t, err)
+		target, err := store.Execution().GetAgentEventWebhookTarget(ctx, launch.Agent.ID)
+		require.NoError(t, err)
+		require.Equal(t, testProjectID, target.ProjectID)
+		require.Equal(t, destination, target.URL)
+	}
+	target, err = store.Execution().GetAgentEventWebhookTarget(ctx, uuid.New())
+	require.NoError(t, err)
+	require.Empty(t, target.URL)
 }

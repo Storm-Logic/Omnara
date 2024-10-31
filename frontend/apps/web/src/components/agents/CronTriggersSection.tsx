@@ -5,7 +5,7 @@ import {
   useUpdateCronTrigger,
 } from '@omnara/react'
 import { type CronTrigger } from '@omnara/sdk'
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 
 import { cronTriggerDeliveryModeLabel } from '@/components/agents/cron-trigger-delivery-mode'
 import { EditCronTriggerDialog } from '@/components/agents/CronTriggerDialog'
@@ -39,12 +39,14 @@ export function CronTriggersList({
   canManage,
   filters,
   emptyMessage,
+  emptyState,
 }: {
   orgId: string
   projectId: string
   canManage: boolean
   filters: CronTriggerListFilters
   emptyMessage: string
+  emptyState?: ReactNode
 }) {
   const query = useCronTriggers(orgId, projectId, { filters })
   const triggers = useInfiniteQueryItems(query)
@@ -88,9 +90,10 @@ export function CronTriggersList({
                 </div>
                 <p className="text-muted-foreground truncate text-xs">
                   <span className="font-mono">{trigger.cron}</span> · {trigger.timezone}
-                  {trigger.target.type === 'agent' &&
-                    ` · ${cronTriggerDeliveryModeLabel(trigger.target.delivery_mode ?? 'queued')}`}
-                  {trigger.next_fire_at && nextFireLabel(trigger.next_fire_at)}
+                  {trigger.target.type === 'agent' && (
+                    <span>{` · ${cronTriggerDeliveryModeLabel(trigger.target.delivery_mode ?? 'queued')}`}</span>
+                  )}
+                  {trigger.next_fire_at && <span>{nextFireLabel(trigger.next_fire_at)}</span>}
                 </p>
                 {trigger.failure_report && (
                   <p className="text-destructive break-words text-xs">
@@ -177,9 +180,11 @@ export function CronTriggersList({
           </Button>
         </div>
       ) : (
-        <div className="border-border bg-background/60 text-muted-foreground flex min-h-16 items-center justify-center rounded-md border border-dashed px-4 text-sm">
-          {emptyMessage}
-        </div>
+        (emptyState ?? (
+          <div className="border-border bg-background/60 text-muted-foreground flex min-h-16 items-center justify-center rounded-md border border-dashed px-4 text-sm">
+            {emptyMessage}
+          </div>
+        ))
       )}
       {query.hasNextPage && (
         <Button

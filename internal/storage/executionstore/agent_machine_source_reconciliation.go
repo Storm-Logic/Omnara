@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/notifications"
@@ -20,7 +21,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 	txNotifications *notifications.TxNotifications,
 	tx pgx.Tx,
 	qtx *dbsqlc.Queries,
-	orgID, projectID, agentID ID,
+	projectID, agentID uuid.UUID,
 	currentContract, nextContract agentconfig.RuntimeContract,
 	nextSources []launchMachineSource,
 ) ([]MachineRecord, error) {
@@ -32,35 +33,35 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 	if err != nil {
 		return nil, err
 	}
-	currentMachines := make(map[ID]launchMachineSource, len(currentSources))
-	currentPools := make(map[ID]launchMachineSource, len(currentSources))
-	nextMachines := make(map[ID]launchMachineSource, len(nextSources))
-	nextPools := make(map[ID]launchMachineSource, len(nextSources))
+	currentMachines := make(map[uuid.UUID]launchMachineSource, len(currentSources))
+	currentPools := make(map[uuid.UUID]launchMachineSource, len(currentSources))
+	nextMachines := make(map[uuid.UUID]launchMachineSource, len(nextSources))
+	nextPools := make(map[uuid.UUID]launchMachineSource, len(nextSources))
 	for _, source := range currentSources {
-		if source.MachineID != NilID {
-			currentMachines[source.MachineID] = source
+		if source.Contract.MachineID != uuid.Nil {
+			currentMachines[source.Contract.MachineID] = source
 		} else {
-			currentPools[source.MachinePoolID] = source
+			currentPools[source.Contract.MachinePoolID] = source
 		}
 	}
 	for _, source := range nextSources {
-		if source.MachineID != NilID {
-			nextMachines[source.MachineID] = source
+		if source.Contract.MachineID != uuid.Nil {
+			nextMachines[source.Contract.MachineID] = source
 		} else {
-			nextPools[source.MachinePoolID] = source
+			nextPools[source.Contract.MachinePoolID] = source
 		}
 	}
 	var deleteMachines []MachineRecord
 	for _, source := range currentSources {
-		if source.MachineID != NilID {
-			if _, ok := nextMachines[source.MachineID]; ok {
+		if source.Contract.MachineID != uuid.Nil {
+			if _, ok := nextMachines[source.Contract.MachineID]; ok {
 				continue
 			}
 			grant, err := qtx.GetActiveProjectMachineGrantForMachine(
 				ctx,
 				dbsqlc.GetActiveProjectMachineGrantForMachineParams{
 					ProjectID: projectID,
-					MachineID: source.MachineID,
+					MachineID: source.Contract.MachineID,
 				},
 			)
 			if err == nil {
@@ -86,7 +87,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 				dbsqlc.ReleaseExplicitAgentMachineBindingParams{
 					ProjectID: projectID,
 					AgentID:   agentID,
-					MachineID: source.MachineID,
+					MachineID: source.Contract.MachineID,
 				},
 			)
 			if err != nil {
@@ -94,17 +95,17 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 			}
 			continue
 		}
-		if _, ok := nextPools[source.MachinePoolID]; ok {
+		if _, ok := nextPools[source.Contract.MachinePoolID]; ok {
 			continue
 		}
 		machineRows, err := qtx.MarkRemovedAgentPoolSourceMachinesDeleting(
 			ctx,
 			dbsqlc.MarkRemovedAgentPoolSourceMachinesDeletingParams{
-				LifecycleReasonCode:    sqlcTextFromEmpty("agent_config_machine_source_removed"),
+				LifecycleReasonCode:    storeutil.TextFromEmpty("agent_config_machine_source_removed"),
 				LifecycleReasonMessage: "cleaning up machine after machine source removal",
 				ProjectID:              projectID,
 				AgentID:                agentID,
-				MachinePoolID:          source.MachinePoolID,
+				MachinePoolID:          source.Contract.MachinePoolID,
 			},
 		)
 		if err != nil {
@@ -119,13 +120,9 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 	}
 	var poolMachines []PoolMachineRecord
 	for _, source := range nextSources {
-		if source.MachineID != NilID {
-			current, exists := currentMachines[source.MachineID]
+		if source.Contract.MachineID != uuid.Nil {
+			current, exists := currentMachines[source.Contract.MachineID]
 			if !exists {
-				machineRef, err := newMachineRef()
-				if err != nil {
-					return nil, err
-				}
 				envOverlay, secretEnvOverlay, err := MachineEnvironmentOverlayToColumns(
 					source.BindingConfig.EnvironmentOverlay,
 				)
@@ -136,7 +133,6 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 					ProjectID:             projectID,
 					AgentID:               agentID,
 					ProjectMachineGrantID: source.GrantID,
-					MachineRef:            machineRef,
 					BindingKind:           MachineBindingKindExplicit,
 					Description:           source.Contract.Description,
 					Cwd:                   source.BindingConfig.Cwd,
@@ -156,7 +152,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 				dbsqlc.GetAgentMachineBindingByMachineParams{
 					ProjectID:   projectID,
 					AgentID:     agentID,
-					MachineID:   source.MachineID,
+					MachineID:   source.Contract.MachineID,
 					BindingKind: string(MachineBindingKindExplicit),
 				},
 			)
@@ -171,7 +167,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 			}
 			continue
 		}
-		current, exists := currentPools[source.MachinePoolID]
+		current, exists := currentPools[source.Contract.MachinePoolID]
 		if !exists {
 			continue
 		}
@@ -185,7 +181,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 			}
 		}
 		for _, machine := range poolMachines {
-			if machine.Machine.MachinePoolID != source.MachinePoolID ||
+			if machine.Machine.MachinePoolID != source.Contract.MachinePoolID ||
 				machine.Machine.LifecycleState == MachineLifecycleStateDeleting ||
 				machine.Machine.LifecycleState == MachineLifecycleStateDeleteFailed {
 				continue
@@ -197,11 +193,7 @@ func (s *Store) reconcileAgentMachineSourcesTx(
 			if err != nil {
 				return nil, fmt.Errorf("load pool machine environment: %w", err)
 			}
-			if _, err := resolveMachineEnvironmentTx(
-				ctx,
-				qtx,
-				orgID,
-				projectID,
+			if _, err := resolveMachineEnvironment(
 				machineEnvironment,
 				source.BindingConfig.EnvironmentOverlay,
 			); err != nil {
@@ -233,7 +225,7 @@ func sameMachineBindingConfig(left, right agentconfig.RuntimeMachine) bool {
 func updateAgentMachineBindingConfigTx(
 	ctx context.Context,
 	qtx *dbsqlc.Queries,
-	projectID, agentID, bindingID ID,
+	projectID, agentID, bindingID uuid.UUID,
 	source launchMachineSource,
 ) error {
 	envOverlay, secretEnvOverlay, err := MachineEnvironmentOverlayToColumns(

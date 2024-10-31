@@ -6,6 +6,9 @@ import type {
 } from '@omnara/sdk'
 import { type SyntheticEvent, useRef, useState } from 'react'
 
+import { KeyValueEditor } from '@/components/key-value/KeyValueEditor'
+import { recordFromSecretRows, recordFromTextRows } from '@/components/key-value/keyValueRows'
+import { OverridesCollapsible } from '@/components/machines/MachineOverrideFields'
 import { CredentialSecretField } from '@/components/secrets/CredentialSecretField'
 import { Button } from '@/components/ui/button'
 import {
@@ -31,7 +34,10 @@ import { idle, statusError, submitError } from '@/lib/submit-status'
 
 import { AddDiscoveredModelsStep } from './AddDiscoveredModelsStep'
 import {
+  apiFormatLabel,
+  apiFormatOptions,
   awsRegionPattern,
+  baseUrlPattern,
   bedrockAPIOption,
   bedrockAPIOptions,
   bedrockAuthOption,
@@ -59,6 +65,11 @@ function modelProviderRequest(
   const common = {
     name: values.name,
     credential_secret_id: values.secretId,
+    headers: recordFromTextRows(values.headerRows),
+    secret_headers: recordFromSecretRows(values.secretHeaderRows),
+  }
+  if (values.provider === 'custom') {
+    return { ...common, api_format: values.apiFormat, base_url: values.baseUrl.trim() }
   }
   if (values.provider !== 'bedrock') return { ...common, preset: values.provider }
 
@@ -163,6 +174,66 @@ function BedrockProviderFields({
   )
 }
 
+function CustomProviderFields({
+  values,
+  onChange,
+}: {
+  values: CreateModelProviderFormValues
+  onChange: (patch: Partial<CreateModelProviderFormValues>) => void
+}) {
+  const baseUrlValid = baseUrlPattern.test(values.baseUrl.trim())
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field>
+        <FieldLabel htmlFor="mp-api-format">API format</FieldLabel>
+        <Select
+          value={values.apiFormat}
+          onValueChange={(value) => {
+            const option = apiFormatOptions.find((candidate) => candidate.value === value)
+            if (!option) return
+            onChange({ apiFormat: option.value })
+          }}
+        >
+          <SelectTrigger id="mp-api-format" className="w-full">
+            <SelectValue>{apiFormatLabel(values.apiFormat)}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {apiFormatOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <FieldDescription>The wire protocol the endpoint speaks.</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="mp-base-url">Base URL</FieldLabel>
+        <Input
+          id="mp-base-url"
+          required
+          type="url"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          value={values.baseUrl}
+          placeholder="https://api.example.com/v1"
+          aria-invalid={values.baseUrl !== '' && !baseUrlValid}
+          onChange={(event) => {
+            onChange({ baseUrl: event.target.value })
+          }}
+        />
+        <FieldDescription>
+          {baseUrlValid
+            ? 'A public HTTPS endpoint. The request path defaults from the API format.'
+            : 'Enter a URL such as https://api.example.com/v1.'}
+        </FieldDescription>
+      </Field>
+    </div>
+  )
+}
+
 function credentialFieldCopy(
   values: CreateModelProviderFormValues,
   provider: ReturnType<typeof modelProviderOption>,
@@ -251,13 +322,13 @@ export function CreateModelProviderDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="sm:max-w-2xl">
         {phase.step === 'provider' ? (
           <>
             <DialogHeader>
               <DialogTitle>Add model provider</DialogTitle>
               <DialogDescription>
-                Connect OpenAI, OpenRouter, Anthropic, or Amazon Bedrock.
+                Connect OpenAI, OpenRouter, Anthropic, Amazon Bedrock, or a custom endpoint.
               </DialogDescription>
             </DialogHeader>
             <form
@@ -313,6 +384,14 @@ export function CreateModelProviderDialog({
                     }}
                   />
                 )}
+                {values.provider === 'custom' && (
+                  <CustomProviderFields
+                    values={values}
+                    onChange={(patch) => {
+                      setValues((prev) => ({ ...prev, ...patch }))
+                    }}
+                  />
+                )}
                 <CredentialSecretField
                   key={`${values.provider}-${values.bedrockAuth}`}
                   orgId={orgId}
@@ -330,6 +409,24 @@ export function CreateModelProviderDialog({
                   secretValuePlaceholder={provider.keyPlaceholder}
                   kind={credential.kind}
                 />
+                <OverridesCollapsible title="Advanced">
+                  <KeyValueEditor
+                    orgId={orgId}
+                    enabled={open}
+                    label="Headers"
+                    itemLabel="Header"
+                    keyPlaceholder="Header-Name"
+                    textRows={values.headerRows}
+                    secretRows={values.secretHeaderRows}
+                    onChange={({ textRows, secretRows }) => {
+                      setValues((prev) => ({
+                        ...prev,
+                        headerRows: textRows,
+                        secretHeaderRows: secretRows,
+                      }))
+                    }}
+                  />
+                </OverridesCollapsible>
                 {statusError(status) && (
                   <p className="text-destructive text-sm">{statusError(status)}</p>
                 )}

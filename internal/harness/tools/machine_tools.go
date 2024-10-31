@@ -1,14 +1,17 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/machinepool"
-	"github.com/omnara-ai/omnara/internal/storage"
+	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 )
@@ -16,11 +19,13 @@ import (
 var ErrNoMachine = errors.New("no_machine")
 
 type createMachineRequest struct {
-	MachinePoolName string `json:"machine_pool_name"`
+	MachinePoolID string `json:"machine_pool_id,omitempty"`
+	CPU           *int   `json:"cpu,omitempty"`
+	MemoryMB      *int   `json:"memory_mb,omitempty"`
 }
 
-type machineRefRequest struct {
-	MachineRef string `json:"machine_ref"`
+type listMachinesRequest struct {
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type machineObservationMode string
@@ -31,8 +36,8 @@ const (
 )
 
 type machineObservationAuthorization struct {
-	Mode       machineObservationMode `json:"mode"`
-	MachineRef string                 `json:"machine_ref,omitempty"`
+	Mode      machineObservationMode `json:"mode"`
+	MachineID string                 `json:"machine_id,omitempty"`
 }
 
 func validateCreateMachineInput(input json.RawMessage) error {
@@ -41,24 +46,22 @@ func validateCreateMachineInput(input json.RawMessage) error {
 }
 
 func validateDeleteMachineInput(input json.RawMessage) error {
-	_, err := resolveMachineRefRequest(input, false)
+	_, err := resolveMachineIDRequest(input, false)
 	return err
 }
 
 func validateInspectMachineInput(input json.RawMessage) error {
-	_, err := resolveMachineRefRequest(input, true)
+	_, err := resolveMachineIDRequest(input, true)
 	return err
 }
 
 func validateListMachinesInput(input json.RawMessage) error {
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(input, &body); err != nil {
-		return fmt.Errorf("parse list_machines request: %w", err)
+	var request listMachinesRequest
+	if err := decodeSingleStrictJSON(input, &request, "list_machines request"); err != nil {
+		return err
 	}
-	if len(body) != 0 {
-		return errors.New("list_machines request has unsupported fields")
-	}
-	return nil
+	_, _, err := decodeMachineListCursor(request.Cursor)
+	return err
 }
 
 func createMachine(
@@ -85,7 +88,7 @@ func createMachine(
 	if err != nil {
 		return failMachineTransaction("create_machine_failed", err, false)
 	}
-	authorizationInput, err := machineCreateAuthorizationInput(source.MachinePoolName)
+	authorizationInput, err := machineCreateAuthorizationInput(source.MachinePoolID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +104,8 @@ func createMachine(
 	command := executionstore.CreatePoolMachineForToolCall(
 		executionstore.CreatePoolMachineInput{
 			MachinePoolID: source.MachinePoolID,
+			CPU:           input.CPU,
+			MemoryMB:      input.MemoryMB,
 		},
 		func(created executionstore.CreatePoolMachineResult) (executionstore.ToolCallCompletionInput, error) {
 			content, err := machineProvisioningAcceptedResult(created.Machine)
@@ -126,11 +131,7 @@ func deleteMachine(
 	ctx context.Context,
 	call transactionalToolContext,
 ) (transactionalPhaseResult, error) {
-	input, err := resolveMachineRefRequest(call.Call.Input, false)
-	if err != nil {
-		return nil, err
-	}
-	authorizationInput, err := marshalJSON(input)
+	machineID, err := resolveMachineIDRequest(call.Call.Input, false)
 	if err != nil {
 		return nil, err
 	}
@@ -139,13 +140,13 @@ func deleteMachine(
 		call.Reader,
 		call.Turn,
 		call.Call,
-		authorizationInput,
+		call.Call.Input,
 	); err != nil {
 		return nil, fmt.Errorf("authorize %s: %w", call.Call.Name, err)
 	}
 	command := executionstore.DeletePoolMachineForToolCall(
 		executionstore.DeletePoolMachineInput{
-			MachineRef: input.MachineRef,
+			MachineID: machineID,
 		},
 		func(record executionstore.PoolMachineRecord) (executionstore.ToolCallCompletionInput, error) {
 			content, err := machineDeletionAcceptedResult(record)
@@ -172,6 +173,10 @@ func listMachines(
 	ctx context.Context,
 	call transactionalToolContext,
 ) (transactionalPhaseResult, error) {
+	var input listMachinesRequest
+	if err := decodeSingleStrictJSON(call.Call.Input, &input, "list_machines request"); err != nil {
+		return nil, err
+	}
 	authorizationInput, err := machineObservationAuthorizationInput(machineObservationList, "")
 	if err != nil {
 		return nil, err
@@ -189,30 +194,160 @@ func listMachines(
 	if err != nil {
 		return nil, err
 	}
-	machineResults := make([]machineObservationPayload, 0, len(machines))
-	for _, machine := range machines {
-		machineResults = append(machineResults, agentMachineObservation(machine))
-	}
-	content, err := structuredToolResultContent(
-		machineListResult{Machines: machineResults},
-	)
+	agentConfigID, err := agentConfigIDForModelContext(ctx, call.Reader, call.Turn.ModelCallContextID)
 	if err != nil {
 		return nil, err
 	}
-	return completeInTransaction(content), nil
+	pools, err := call.Reader.ListMachinePoolSources(ctx, agentConfigID)
+	if err != nil {
+		return nil, err
+	}
+	return machineListPage(machines, pools, input.Cursor)
+}
+
+func decodeMachineListCursor(cursor string) (publicid.Kind, uuid.UUID, error) {
+	if cursor == "" {
+		return publicid.KindMachinePool, uuid.Nil, nil
+	}
+	for _, kind := range []publicid.Kind{publicid.KindMachinePool, publicid.KindMachine} {
+		if id, err := publicid.Decode(kind, cursor); err == nil {
+			return kind, id, nil
+		}
+	}
+	return "", uuid.Nil, errors.New("cursor must be a valid machine_pool_id or machine_id from list_machines")
+}
+
+func machineListPage(
+	machines []executionstore.AgentMachineObservationRecord,
+	pools []executionstore.MachinePoolSourceRecord,
+	cursor string,
+) (transactionalPhaseResult, error) {
+	kind, cursorID, err := decodeMachineListCursor(cursor)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(pools, func(a, b executionstore.MachinePoolSourceRecord) int {
+		return bytes.Compare(a.MachinePoolID[:], b.MachinePoolID[:])
+	})
+	slices.SortFunc(machines, func(a, b executionstore.AgentMachineObservationRecord) int {
+		return bytes.Compare(a.MachineID[:], b.MachineID[:])
+	})
+	page := machineListResult{Machines: []machineObservationPayload{}, MachinePools: []machinePoolPayload{}}
+	entryBytes := 0
+	reserveEntry := func(entry any, collectionSize int, nextCursor string) (bool, error) {
+		encoded, err := marshalJSON(entry)
+		if err != nil {
+			return false, err
+		}
+		nextBytes := entryBytes + len(encoded)
+		if collectionSize > 0 {
+			nextBytes++
+		}
+		envelope, err := structuredToolResultContent(machineListResult{
+			Machines: []machineObservationPayload{}, MachinePools: []machinePoolPayload{}, NextCursor: nextCursor,
+		})
+		if err != nil {
+			return false, err
+		}
+		parts, err := envelope.contentParts()
+		if err != nil {
+			return false, err
+		}
+		if len(parts)+nextBytes > executionstore.ToolResultInlineBudgetBytes {
+			return false, nil
+		}
+		entryBytes = nextBytes
+		return true, nil
+	}
+	finish := func() (transactionalPhaseResult, error) {
+		content, err := structuredToolResultContent(page)
+		if err != nil {
+			return nil, err
+		}
+		return completeInTransaction(content), nil
+	}
+	if kind == publicid.KindMachinePool {
+		for index, pool := range pools {
+			if bytes.Compare(pool.MachinePoolID[:], cursorID[:]) <= 0 {
+				continue
+			}
+			poolID, err := publicid.Encode(publicid.KindMachinePool, pool.MachinePoolID)
+			if err != nil {
+				return nil, err
+			}
+			entry := machinePoolPayload{
+				MachinePoolID: poolID, MachinePoolName: pool.MachinePoolName, Description: pool.Description,
+				SupportedOverrides: pool.SupportedOverrides,
+				DefaultCPU:         pool.DefaultCPU,
+				DefaultMemoryMB:    pool.DefaultMemoryMB,
+				MinCPU:             pool.MinCPU,
+				MaxCPU:             pool.MaxCPU,
+				MinMemoryMB:        pool.MinMemoryMB,
+				MaxMemoryMB:        pool.MaxMemoryMB,
+			}
+			nextCursor := poolID
+			if index == len(pools)-1 && len(machines) == 0 {
+				nextCursor = ""
+			}
+			fits, err := reserveEntry(entry, len(page.MachinePools), nextCursor)
+			if err != nil {
+				return nil, err
+			}
+			if !fits {
+				if len(page.MachinePools) == 0 {
+					return failMachineTransaction("machine_pool_details_too_large", fmt.Errorf(
+						"details for machine pool %s exceed the list_machines size limit; call list_machines with cursor %q to continue",
+						poolID, poolID,
+					), false)
+				}
+				return finish()
+			}
+			page.MachinePools = append(page.MachinePools, entry)
+			page.NextCursor = nextCursor
+		}
+	}
+	for index, machine := range machines {
+		if kind == publicid.KindMachine && bytes.Compare(machine.MachineID[:], cursorID[:]) <= 0 {
+			continue
+		}
+		observation, err := agentMachineObservation(machine)
+		if err != nil {
+			return nil, err
+		}
+		nextCursor := ""
+		if index < len(machines)-1 {
+			nextCursor = observation.MachineID
+		}
+		fits, err := reserveEntry(observation, len(page.Machines), nextCursor)
+		if err != nil {
+			return nil, err
+		}
+		if !fits {
+			if len(page.Machines) == 0 && len(page.MachinePools) == 0 {
+				return failMachineTransaction("machine_details_too_large", fmt.Errorf(
+					"details for machine %s exceed the list_machines size limit; use inspect_machine for details, or call list_machines with cursor %q to continue",
+					observation.MachineID, observation.MachineID,
+				), false)
+			}
+			break
+		}
+		page.Machines = append(page.Machines, observation)
+		page.NextCursor = nextCursor
+	}
+	return finish()
 }
 
 func inspectMachine(
 	ctx context.Context,
 	call transactionalToolContext,
 ) (transactionalPhaseResult, error) {
-	input, err := resolveMachineRefRequest(call.Call.Input, true)
+	machineID, err := resolveMachineIDRequest(call.Call.Input, true)
 	if err != nil {
 		return nil, err
 	}
 	var record executionstore.AgentMachineObservationRecord
-	if input.MachineRef != "" {
-		record, err = call.Reader.GetAgentMachineObservationByRef(ctx, input.MachineRef)
+	if machineID != uuid.Nil {
+		record, err = call.Reader.GetAgentMachineObservationByMachineID(ctx, machineID)
 	} else {
 		var machines []executionstore.AgentMachineObservationRecord
 		machines, err = call.Reader.ListAgentMachineObservations(ctx)
@@ -221,11 +356,11 @@ func inspectMachine(
 		}
 	}
 	if err != nil {
-		if input.MachineRef != "" && errors.Is(err, storeerr.ErrNotFound) {
-			err = ErrMachineRefUnavailable
+		if machineID != uuid.Nil && errors.Is(err, storeerr.ErrNotFound) {
+			err = ErrMachineIDUnavailable
 		}
 		if errors.Is(err, ErrMachineSelectionRequired) ||
-			errors.Is(err, ErrMachineRefUnavailable) {
+			errors.Is(err, ErrMachineIDUnavailable) {
 			unavailable, resultErr := machineUnavailableToolResult(err)
 			if resultErr != nil {
 				return nil, resultErr
@@ -245,9 +380,13 @@ func inspectMachine(
 		}
 		return failMachineTransaction("inspect_machine_failed", err, false)
 	}
+	machinePublicID, err := publicid.Encode(publicid.KindMachine, record.MachineID)
+	if err != nil {
+		return nil, err
+	}
 	authorizationInput, err := machineObservationAuthorizationInput(
 		machineObservationInspect,
-		record.MachineRef,
+		machinePublicID,
 	)
 	if err != nil {
 		return nil, err
@@ -261,7 +400,11 @@ func inspectMachine(
 	); err != nil {
 		return nil, err
 	}
-	content, err := structuredToolResultContent(agentMachineInspection(record))
+	payload, err := agentMachineInspection(record)
+	if err != nil {
+		return nil, err
+	}
+	content, err := structuredToolResultContent(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +428,7 @@ func deleteMachineInBackground(
 func (e Executor) provisionMachineForToolCall(
 	ctx context.Context,
 	turn Turn,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 ) error {
 	record, err := e.Store.Execution().GetPoolMachineByCreateToolCall(
 		ctx,
@@ -311,7 +454,7 @@ func (e Executor) provisionMachineForToolCall(
 func (e Executor) deleteMachineForToolCall(
 	ctx context.Context,
 	turn Turn,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 ) error {
 	record, err := e.Store.Execution().GetPoolMachineByDeleteToolCall(
 		ctx,
@@ -342,16 +485,9 @@ func resolveCreateMachineRequest(raw json.RawMessage) (createMachineRequest, err
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return createMachineRequest{}, fmt.Errorf("parse create_machine request: %w", err)
 	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return createMachineRequest{}, fmt.Errorf("parse create_machine request: %w", err)
-	}
-	for field, value := range body {
-		if field != "machine_pool_name" {
-			return createMachineRequest{}, fmt.Errorf("create_machine request has unsupported field %q", field)
-		}
-		if string(value) == "null" {
-			return createMachineRequest{}, errors.New("create_machine machine_pool_name cannot be null")
+	if input.MachinePoolID != "" {
+		if _, err := publicid.Decode(publicid.KindMachinePool, input.MachinePoolID); err != nil {
+			return createMachineRequest{}, fmt.Errorf("machine_pool_id must be a valid public machine pool ID: %w", err)
 		}
 	}
 	return input, nil
@@ -360,31 +496,36 @@ func resolveCreateMachineRequest(raw json.RawMessage) (createMachineRequest, err
 func agentConfigIDForModelContext(
 	ctx context.Context,
 	reader *executionstore.ToolCallReader,
-	modelCallContextID storage.ID,
-) (storage.ID, error) {
+	modelCallContextID uuid.UUID,
+) (uuid.UUID, error) {
 	contextRecord, found, err := reader.GetModelCallContext(ctx, modelCallContextID)
 	if err != nil {
-		return storage.NilID, err
+		return uuid.Nil, err
 	}
 	if !found {
-		return storage.NilID, fmt.Errorf("model call context not found: %w", storeerr.ErrNotFound)
+		return uuid.Nil, fmt.Errorf("model call context not found: %w", storeerr.ErrNotFound)
 	}
 	return contextRecord.AgentConfigID, nil
 }
 
 func machineCreateAuthorizationInput(
-	machinePoolName string,
+	machinePoolID uuid.UUID,
+	input createMachineRequest,
 ) (json.RawMessage, error) {
-	return marshalJSON(createMachineRequest{MachinePoolName: machinePoolName})
+	poolID, err := publicid.Encode(publicid.KindMachinePool, machinePoolID)
+	if err != nil {
+		return nil, err
+	}
+	return marshalJSON(createMachineRequest{MachinePoolID: poolID, CPU: input.CPU, MemoryMB: input.MemoryMB})
 }
 
 func machineObservationAuthorizationInput(
 	mode machineObservationMode,
-	machineRef string,
+	machineID string,
 ) (json.RawMessage, error) {
 	return marshalJSON(machineObservationAuthorization{
-		Mode:       mode,
-		MachineRef: machineRef,
+		Mode:      mode,
+		MachineID: machineID,
 	})
 }
 
@@ -392,14 +533,18 @@ func selectPoolForMachineCreate(
 	sources []executionstore.MachinePoolSourceRecord,
 	input createMachineRequest,
 ) (executionstore.MachinePoolSourceRecord, error) {
-	if input.MachinePoolName != "" {
+	if input.MachinePoolID != "" {
+		poolID, err := publicid.Decode(publicid.KindMachinePool, input.MachinePoolID)
+		if err != nil {
+			return executionstore.MachinePoolSourceRecord{}, err
+		}
 		for _, source := range sources {
-			if source.MachinePoolName == input.MachinePoolName {
-				return source, nil
+			if source.MachinePoolID == poolID {
+				return source, validateCreateMachineOverrides(source, input)
 			}
 		}
 		return executionstore.MachinePoolSourceRecord{}, fmt.Errorf(
-			"machine_pool_name is not configured for this agent: %w",
+			"machine_pool_id is not available to this agent: %w",
 			storeerr.ErrNotFound,
 		)
 	}
@@ -410,35 +555,74 @@ func selectPoolForMachineCreate(
 			storeerr.ErrNotFound,
 		)
 	case 1:
-		return sources[0], nil
+		return sources[0], validateCreateMachineOverrides(sources[0], input)
 	default:
 		return executionstore.MachinePoolSourceRecord{}, errors.New(
-			"machine_pool_name is required when multiple machine pools are available",
+			"machine_pool_id is required when multiple machine pools are available; use list_machines to discover pools",
 		)
 	}
 }
 
-func resolveMachineRefRequest(raw json.RawMessage, optional bool) (machineRefRequest, error) {
-	var input machineRefRequest
-	if err := json.Unmarshal(raw, &input); err != nil {
-		return machineRefRequest{}, fmt.Errorf("parse machine request: %w", err)
+func validateCreateMachineOverrides(source executionstore.MachinePoolSourceRecord, input createMachineRequest) error {
+	for _, resource := range []struct {
+		name            string
+		value, min, max *int
+	}{
+		{"cpu", input.CPU, source.MinCPU, source.MaxCPU},
+		{"memory_mb", input.MemoryMB, source.MinMemoryMB, source.MaxMemoryMB},
+	} {
+		if resource.value == nil {
+			continue
+		}
+		if !slices.Contains(source.SupportedOverrides, resource.name) {
+			return fmt.Errorf("machine pool does not support %s overrides", resource.name)
+		}
+		if resource.min != nil && *resource.value < *resource.min {
+			return fmt.Errorf("%s must be at least %d for this machine pool", resource.name, *resource.min)
+		}
+		if resource.max != nil && *resource.value > *resource.max {
+			return fmt.Errorf("%s must be at most %d for this machine pool", resource.name, *resource.max)
+		}
 	}
+	return nil
+}
+
+func resolveOptionalMachineID(raw json.RawMessage) (uuid.UUID, error) {
+	if len(raw) == 0 {
+		return uuid.Nil, nil
+	}
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return uuid.Nil, fmt.Errorf("parse machine_id: %w", err)
+	}
+	if value == nil {
+		return uuid.Nil, errors.New("machine_id cannot be null")
+	}
+	id, err := publicid.Decode(publicid.KindMachine, *value)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("machine_id must be a valid public machine ID: %w", err)
+	}
+	return id, nil
+}
+
+func resolveMachineIDRequest(raw json.RawMessage, optional bool) (uuid.UUID, error) {
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &body); err != nil {
-		return machineRefRequest{}, fmt.Errorf("parse machine request: %w", err)
+		return uuid.Nil, fmt.Errorf("parse machine request: %w", err)
 	}
-	for field, value := range body {
-		if field != "machine_ref" {
-			return machineRefRequest{}, fmt.Errorf("machine request has unsupported field %q", field)
-		}
-		if string(value) == "null" {
-			return machineRefRequest{}, errors.New("machine machine_ref cannot be null")
+	for field := range body {
+		if field != "machine_id" {
+			return uuid.Nil, fmt.Errorf("machine request has unsupported field %q", field)
 		}
 	}
-	if input.MachineRef == "" && !optional {
-		return machineRefRequest{}, errors.New("machine_ref is required")
+	machineID, err := resolveOptionalMachineID(body["machine_id"])
+	if err != nil {
+		return uuid.Nil, err
 	}
-	return input, nil
+	if machineID == uuid.Nil && !optional {
+		return uuid.Nil, errors.New("machine_id is required")
+	}
+	return machineID, nil
 }
 
 func selectOnlyMachine[T any](machines []T) (T, error) {
@@ -454,12 +638,15 @@ func selectOnlyMachine[T any](machines []T) (T, error) {
 }
 
 type machineObservationPayload struct {
-	MachineRef             string    `json:"machine_ref"`
+	MachineID              string    `json:"machine_id"`
 	SourceKind             string    `json:"source_kind,omitempty"`
 	BindingKind            string    `json:"binding_kind,omitempty"`
 	BindingState           string    `json:"binding_state"`
 	DisplayName            string    `json:"display_name,omitempty"`
+	MachinePoolID          string    `json:"machine_pool_id,omitempty"`
 	MachinePoolName        string    `json:"machine_pool_name,omitempty"`
+	CPU                    *int      `json:"cpu,omitempty"`
+	MemoryMB               *int      `json:"memory_mb,omitempty"`
 	LifecycleState         string    `json:"lifecycle_state"`
 	ConnectionState        string    `json:"connection_state"`
 	ConnectionStateReason  string    `json:"connection_state_reason,omitempty"`
@@ -474,7 +661,22 @@ type machineObservationPayload struct {
 }
 
 type machineListResult struct {
-	Machines []machineObservationPayload `json:"machines"`
+	Machines     []machineObservationPayload `json:"machines"`
+	MachinePools []machinePoolPayload        `json:"machine_pools"`
+	NextCursor   string                      `json:"next_cursor,omitempty"`
+}
+
+type machinePoolPayload struct {
+	MachinePoolID      string   `json:"machine_pool_id"`
+	MachinePoolName    string   `json:"machine_pool_name"`
+	Description        string   `json:"description,omitempty"`
+	SupportedOverrides []string `json:"supported_overrides"`
+	DefaultCPU         *int     `json:"default_cpu,omitempty"`
+	DefaultMemoryMB    *int     `json:"default_memory_mb,omitempty"`
+	MinCPU             *int     `json:"min_cpu,omitempty"`
+	MaxCPU             *int     `json:"max_cpu,omitempty"`
+	MinMemoryMB        *int     `json:"min_memory_mb,omitempty"`
+	MaxMemoryMB        *int     `json:"max_memory_mb,omitempty"`
 }
 
 type machineInspectionPayload struct {
@@ -497,8 +699,14 @@ type machineDeletionAcceptedPayload struct {
 func machineProvisioningAcceptedResult(
 	record executionstore.PoolMachineRecord,
 ) (toolResultContent, error) {
+	payload, err := machineObservation(record)
+	if err != nil {
+		return toolResultContent{}, err
+	}
+	payload.CPU = record.Machine.CPU
+	payload.MemoryMB = record.Machine.MemoryMB
 	return structuredToolResultContent(machineProvisioningAcceptedPayload{
-		machineObservationPayload: machineObservation(record),
+		machineObservationPayload: payload,
 		Created:                   true,
 		Ready:                     false,
 	})
@@ -507,24 +715,40 @@ func machineProvisioningAcceptedResult(
 func machineDeletionAcceptedResult(
 	record executionstore.PoolMachineRecord,
 ) (toolResultContent, error) {
+	payload, err := machineObservation(record)
+	if err != nil {
+		return toolResultContent{}, err
+	}
 	return structuredToolResultContent(machineDeletionAcceptedPayload{
-		machineObservationPayload: machineObservation(record),
+		machineObservationPayload: payload,
 		Deleted:                   false,
 		DeletionInProgress:        true,
 	})
 }
 
-func machineObservation(record executionstore.PoolMachineRecord) machineObservationPayload {
+func machineObservation(record executionstore.PoolMachineRecord) (machineObservationPayload, error) {
+	machineID, err := publicid.Encode(publicid.KindMachine, record.Machine.ID)
+	if err != nil {
+		return machineObservationPayload{}, err
+	}
+	var poolID string
+	if record.Machine.MachinePoolID != uuid.Nil {
+		poolID, err = publicid.Encode(publicid.KindMachinePool, record.Machine.MachinePoolID)
+		if err != nil {
+			return machineObservationPayload{}, err
+		}
+	}
 	cwd := record.Binding.Cwd
 	if cwd == "" {
 		cwd = record.Machine.Cwd
 	}
 	return machineObservationPayload{
-		MachineRef:             record.Binding.MachineRef,
+		MachineID:              machineID,
 		SourceKind:             string(record.Machine.SourceKind),
 		BindingKind:            string(record.Binding.BindingKind),
 		BindingState:           string(record.Binding.State),
 		DisplayName:            record.Machine.DisplayName,
+		MachinePoolID:          poolID,
 		MachinePoolName:        record.MachinePoolName,
 		LifecycleState:         string(record.Machine.LifecycleState),
 		ConnectionState:        string(record.Machine.ConnectionState),
@@ -536,14 +760,18 @@ func machineObservation(record executionstore.PoolMachineRecord) machineObservat
 		LifecycleReasonMessage: record.Machine.LifecycleReasonMessage,
 		CreatedAt:              record.Binding.CreatedAt,
 		UpdatedAt:              record.Binding.UpdatedAt,
-	}
+	}, nil
 }
 
 func agentMachineObservation(
 	record executionstore.AgentMachineObservationRecord,
-) machineObservationPayload {
+) (machineObservationPayload, error) {
+	machineID, err := publicid.Encode(publicid.KindMachine, record.MachineID)
+	if err != nil {
+		return machineObservationPayload{}, err
+	}
 	payload := machineObservationPayload{
-		MachineRef:          record.MachineRef,
+		MachineID:           machineID,
 		BindingKind:         string(record.BindingKind),
 		BindingState:        string(record.BindingState),
 		Description:         record.Description,
@@ -553,8 +781,16 @@ func agentMachineObservation(
 		UpdatedAt:           record.BindingUpdatedAt,
 	}
 	if record.ProjectGrantMissing {
-		return payload
+		return payload, nil
 	}
+	if record.MachinePoolID != uuid.Nil {
+		payload.MachinePoolID, err = publicid.Encode(publicid.KindMachinePool, record.MachinePoolID)
+		if err != nil {
+			return machineObservationPayload{}, err
+		}
+	}
+	payload.CPU = record.CPU
+	payload.MemoryMB = record.MemoryMB
 	payload.SourceKind = string(record.SourceKind)
 	payload.DisplayName = record.DisplayName
 	payload.MachinePoolName = record.MachinePoolName
@@ -564,19 +800,23 @@ func agentMachineObservation(
 	payload.Cwd = record.Cwd
 	payload.LifecycleReasonCode = record.LifecycleReasonCode
 	payload.LifecycleReasonMessage = record.LifecycleReasonMessage
-	return payload
+	return payload, nil
 }
 
 func agentMachineInspection(
 	record executionstore.AgentMachineObservationRecord,
-) machineInspectionPayload {
+) (machineInspectionPayload, error) {
+	observation, err := agentMachineObservation(record)
+	if err != nil {
+		return machineInspectionPayload{}, err
+	}
 	payload := machineInspectionPayload{
-		machineObservationPayload: agentMachineObservation(record),
+		machineObservationPayload: observation,
 	}
 	if !record.ProjectGrantMissing {
 		payload.FailureReport = record.FailureReport
 	}
-	return payload
+	return payload, nil
 }
 
 func machineExecutable(record executionstore.PoolMachineRecord) bool {

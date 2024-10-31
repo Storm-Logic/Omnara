@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/modelenvelope"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
-	"github.com/omnara-ai/omnara/internal/storage"
 )
 
 type Normalizer interface {
@@ -16,12 +16,12 @@ type Normalizer interface {
 type ProjectionNormalizer struct{}
 
 func (ProjectionNormalizer) Normalize(bundle Bundle) error {
-	if bundle.ProjectID == storage.NilID || bundle.AgentID == storage.NilID || bundle.TurnID == storage.NilID ||
+	if bundle.ProjectID == uuid.Nil || bundle.AgentID == uuid.Nil || bundle.TurnID == uuid.Nil ||
 		len(bundle.OpeningInputIDs) == 0 {
 		return fmt.Errorf("project, agent, turn, and opening inputs are required")
 	}
 	for _, inputID := range bundle.OpeningInputIDs {
-		if inputID == storage.NilID {
+		if inputID == uuid.Nil {
 			return fmt.Errorf("opening input id is required")
 		}
 	}
@@ -90,16 +90,6 @@ func (ProjectionNormalizer) Normalize(bundle Bundle) error {
 	}
 	if currentIntegrationTargets > 1 {
 		return fmt.Errorf("multiple current integration targets in context")
-	}
-	seenAvailableMachinePools := map[string]bool{}
-	for _, pool := range bundle.AvailableMachinePools {
-		if pool.MachinePoolName == "" {
-			return fmt.Errorf("machine pool name is required")
-		}
-		if seenAvailableMachinePools[pool.MachinePoolName] {
-			return fmt.Errorf("duplicate machine pool in context: %s", pool.MachinePoolName)
-		}
-		seenAvailableMachinePools[pool.MachinePoolName] = true
 	}
 	seenToolResults := map[string]bool{}
 	for _, result := range bundle.ToolResults {

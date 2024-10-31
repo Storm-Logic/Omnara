@@ -21,7 +21,6 @@ import (
 	"github.com/omnara-ai/omnara/internal/modelcontext"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
 	"github.com/omnara-ai/omnara/internal/notifications"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
@@ -41,11 +40,11 @@ var (
 	workerTestUserID    = workerTestID("user_test")
 )
 
-func workerTestID(seed string) storage.ID {
+func workerTestID(seed string) uuid.UUID {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("omnara-worker-integration:"+seed))
 }
 
-func workerTestUserPrincipal(userID storage.ID) identitystore.PrincipalRecord {
+func workerTestUserPrincipal(userID uuid.UUID) identitystore.PrincipalRecord {
 	return identitystore.PrincipalRecord{Type: identitystore.PrincipalTypeUser, ID: userID}
 }
 
@@ -183,7 +182,7 @@ func TestWorkerRunOnceAdmitsOneQueuedInputAndLeavesBacklogRunnable(t *testing.T)
 		t.Fatalf("worker should claim queued agent work")
 	}
 	execution := <-executor.started
-	if execution.AgentID != agentID || execution.TurnID == storage.NilID {
+	if execution.AgentID != agentID || execution.TurnID == uuid.Nil {
 		t.Fatalf("worker execution seed mismatch: %+v", execution)
 	}
 	if len(execution.InputIDs) != 1 || execution.InputIDs[0] != firstID {
@@ -191,7 +190,7 @@ func TestWorkerRunOnceAdmitsOneQueuedInputAndLeavesBacklogRunnable(t *testing.T)
 	}
 	assertAgentInputAdmitted(t, ctx, pool, agentID, firstID)
 	assertAgentInputQueued(t, ctx, pool, agentID, secondID)
-	assertTurnInputs(t, ctx, pool, agentID, execution.TurnID, []storage.ID{firstID})
+	assertTurnInputs(t, ctx, pool, agentID, execution.TurnID, []uuid.UUID{firstID})
 	waitNoRuntimeLock(t, ctx, pool, agentID)
 	assertWorkerWakeup(t, ctx, pool, agentID)
 }
@@ -233,7 +232,7 @@ func TestWorkerRunOnceBatchesSteeringInputsAndReleasesRuntime(t *testing.T) {
 		t.Fatalf("worker should claim steering agent work")
 	}
 	execution := <-executor.started
-	if execution.AgentID != agentID || execution.TurnID == storage.NilID {
+	if execution.AgentID != agentID || execution.TurnID == uuid.Nil {
 		t.Fatalf("worker execution seed mismatch: %+v", execution)
 	}
 	if len(execution.InputIDs) != 2 || execution.InputIDs[0] != firstID || execution.InputIDs[1] != secondID {
@@ -241,7 +240,7 @@ func TestWorkerRunOnceBatchesSteeringInputsAndReleasesRuntime(t *testing.T) {
 	}
 	assertAgentInputAdmitted(t, ctx, pool, agentID, firstID)
 	assertAgentInputAdmitted(t, ctx, pool, agentID, secondID)
-	assertTurnInputs(t, ctx, pool, agentID, execution.TurnID, []storage.ID{firstID, secondID})
+	assertTurnInputs(t, ctx, pool, agentID, execution.TurnID, []uuid.UUID{firstID, secondID})
 	waitNoRuntimeLock(t, ctx, pool, agentID)
 	assertWorkerWakeup(t, ctx, pool, agentID)
 }
@@ -393,7 +392,7 @@ func TestWorkerCancelControlCancelsActiveTurnAndDeletesWakeup(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("worker did not start active turn")
 	}
-	if execution.RuntimeLockID == storage.NilID {
+	if execution.RuntimeLockID == uuid.Nil {
 		t.Fatalf("worker execution missing runtime lock: %+v", execution)
 	}
 	steeringID := createWorkerInputWithDeliveryMode(
@@ -553,7 +552,7 @@ func TestWorkerConcurrentRuntimesShareRouteAndCancelIndependently(t *testing.T) 
 		runDone <- err
 	}()
 
-	executions := make(map[storage.ID]kernel.ModelWorkExecution, 2)
+	executions := make(map[uuid.UUID]kernel.ModelWorkExecution, 2)
 	for len(executions) < 2 {
 		select {
 		case execution := <-executor.started:
@@ -572,7 +571,7 @@ func TestWorkerConcurrentRuntimesShareRouteAndCancelIndependently(t *testing.T) 
 	if firstExecution.RuntimeLockID == secondExecution.RuntimeLockID {
 		t.Fatalf("concurrent executions share runtime lock %s", firstExecution.RuntimeLockID)
 	}
-	var firstRouteID, secondRouteID storage.ID
+	var firstRouteID, secondRouteID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 SELECT runtime_lock.worker_process_id
 FROM agent_runtime_locks runtime_lock
@@ -726,7 +725,7 @@ func TestWorkerCancelFallsBackToRenewalWithoutControlDelivery(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("worker did not start active turn")
 	}
-	if execution.RuntimeLockID == storage.NilID {
+	if execution.RuntimeLockID == uuid.Nil {
 		t.Fatalf("worker execution missing runtime lock: %+v", execution)
 	}
 
@@ -800,7 +799,7 @@ func TestWorkerNewInputAfterCancelStartsNewTurn(t *testing.T) {
 		errs <- nil
 	}()
 	firstExecution := <-blockingExecutor.started
-	if firstExecution.TurnID == storage.NilID {
+	if firstExecution.TurnID == uuid.Nil {
 		t.Fatalf("first execution missing turn: %+v", firstExecution)
 	}
 	if _, err := store.Execution().CancelAgent(
@@ -849,7 +848,7 @@ func TestWorkerNewInputAfterCancelStartsNewTurn(t *testing.T) {
 		t.Fatalf("worker should claim new input after cancel")
 	}
 	nextExecution := <-nextExecutor.started
-	if nextExecution.AgentID != agentID || nextExecution.TurnID == storage.NilID ||
+	if nextExecution.AgentID != agentID || nextExecution.TurnID == uuid.Nil ||
 		nextExecution.TurnID == firstExecution.TurnID {
 		t.Fatalf("new input should open a new turn after cancel, got first=%s next=%+v", firstExecution.TurnID, nextExecution)
 	}
@@ -857,7 +856,7 @@ func TestWorkerNewInputAfterCancelStartsNewTurn(t *testing.T) {
 		t.Fatalf("new turn should admit only post-cancel input, got %+v want %s", nextExecution.InputIDs, nextID)
 	}
 	assertAgentInputAdmitted(t, context.Background(), pool, agentID, nextID)
-	assertTurnInputs(t, context.Background(), pool, agentID, nextExecution.TurnID, []storage.ID{nextID})
+	assertTurnInputs(t, context.Background(), pool, agentID, nextExecution.TurnID, []uuid.UUID{nextID})
 }
 
 func TestWorkerRunOnceUsesRealKernelExecutor(t *testing.T) {
@@ -1324,7 +1323,7 @@ func TestWorkerKernelDeniedMachineToolDoesNotRequireBinding(t *testing.T) {
 		agentID,
 		"run_command",
 		"agent config permission mode denied this tool call",
-		storage.NilID,
+		uuid.Nil,
 	)
 	assertAssistantEventRecorded(t, ctx, pool, agentID, "policy denied")
 	waitNoRuntimeLock(t, ctx, pool, agentID)
@@ -1724,7 +1723,7 @@ func createWorkerProject(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	name string,
 	idempotencyKey string,
 	now time.Time,
@@ -1751,7 +1750,7 @@ func createWorkerAgentWithUser(
 	ctx context.Context,
 	store *storage.Store,
 	now time.Time,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	return createWorkerAgentWithTools(t, ctx, store, now)
 }
 
@@ -1761,7 +1760,7 @@ func createWorkerAgentWithTools(
 	store *storage.Store,
 	now time.Time,
 	tools ...string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	permissions := make(map[string]string, len(tools))
 	for _, name := range tools {
 		permissions[name] = toolpermission.ModeAlwaysAllow
@@ -1775,7 +1774,7 @@ func createWorkerAgentWithCatalogDefaultTools(
 	store *storage.Store,
 	now time.Time,
 	tools ...string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	return createWorkerAgentWithCatalogDefaultToolsForProject(t, ctx, store, workerTestProjectID, now, tools...)
 }
 
@@ -1785,7 +1784,7 @@ func createWorkerAgentWithToolPermissions(
 	store *storage.Store,
 	now time.Time,
 	permissionModes map[string]string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	return createWorkerAgentWithToolPermissionsForProject(t, ctx, store, workerTestProjectID, now, permissionModes)
 }
 
@@ -1796,7 +1795,7 @@ func createWorkerAgentWithToolPermissionsAndMachine(
 	now time.Time,
 	permissionModes map[string]string,
 	machineName string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	sourceYAML := "instruction: Help the user make progress.\nmodel:\n  provider_config: openai-prod\n  " +
 		"name: worker-kernel-test\nmachine_sources:\n  - machine_name: " + machineName +
@@ -1820,9 +1819,9 @@ func createWorkerAgentWithProject(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	now time.Time,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	return createWorkerAgentWithToolPermissionsForProject(t, ctx, store, projectID, now, nil)
 }
 
@@ -1830,10 +1829,10 @@ func createWorkerAgentWithCatalogDefaultToolsForProject(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	now time.Time,
 	tools ...string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	sourceYAML := "instruction: Help the user make progress.\n" +
 		"model:\n" +
@@ -1854,10 +1853,10 @@ func createWorkerAgentWithToolPermissionsForProject(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	now time.Time,
 	permissionModes map[string]string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	sourceYAML := "instruction: Help the user make progress.\n" +
 		"model:\n" +
@@ -1882,20 +1881,18 @@ func createWorkerAgentFromSource(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	now time.Time,
 	sourceYAML string,
-) (storage.ID, storage.ID) {
+) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	compiled := compileWorkerAgentYAMLResolved(t, ctx, store, projectID, sourceYAML)
 	config, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               projectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       parseWorkerConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -1927,7 +1924,7 @@ func compileWorkerAgentYAMLResolved(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	sourceYAML string,
 ) agentconfig.Result {
 	t.Helper()
@@ -1948,12 +1945,12 @@ func compileWorkerAgentYAMLResolved(
 		) (agentconfig.ResolvedModelSelection, error) {
 			return resolvedWorkerAgentConfigModel(configuredModel), nil
 		},
-		ResolveMachineName: func(machineName string) (string, error) {
+		ResolveMachineName: func(machineName string) (uuid.UUID, error) {
 			machineID, err := store.Execution().ResolveAgentConfigMachineName(ctx, projectID, machineName)
 			if err != nil {
-				return "", err
+				return uuid.Nil, err
 			}
-			return publicid.Encode(publicid.KindMachine, machineID)
+			return machineID, nil
 		},
 	})
 	if err != nil {
@@ -1967,28 +1964,24 @@ func resolvedWorkerAgentConfigModel(
 ) agentconfig.ResolvedModelSelection {
 	supportsTools := configuredModel.SupportsTools
 	return agentconfig.ResolvedModelSelection{
-		ConfiguredModelID: configuredModel.ID.String(),
+		ConfiguredModelID: configuredModel.ID,
 		SupportsTools:     &supportsTools,
 	}
 }
 
-func parseWorkerConfiguredModelID(t *testing.T, compiled agentconfig.Result) storage.ID {
+func parseWorkerConfiguredModelID(t *testing.T, compiled agentconfig.Result) uuid.UUID {
 	t.Helper()
-	id, err := storage.ParseID(compiled.Compiled.Model.ConfiguredModelID)
-	if err != nil {
-		t.Fatalf("parse compiled configured model id: %v", err)
-	}
-	return id
+	return compiled.Compiled.Model.ConfiguredModelID
 }
 
 func createWorkerInput(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID storage.ID,
+	agentID, userID uuid.UUID,
 	text string,
 	now time.Time,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	return createWorkerInputWithDeliveryMode(t, ctx, store, agentID, userID, text, executionstore.DeliveryModeQueued, now)
 }
@@ -1997,10 +1990,10 @@ func createWorkerInputWithProject(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID, agentID, userID storage.ID,
+	projectID, agentID, userID uuid.UUID,
 	text string,
 	now time.Time,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	return createWorkerInputWithProjectAndDeliveryMode(
 		t,
@@ -2019,11 +2012,11 @@ func createWorkerInputWithDeliveryMode(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID storage.ID,
+	agentID, userID uuid.UUID,
 	text string,
 	deliveryMode executionstore.AgentInputDeliveryMode,
 	now time.Time,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	return createWorkerInputWithProjectAndDeliveryMode(
 		t,
@@ -2042,11 +2035,11 @@ func createWorkerInputWithProjectAndDeliveryMode(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	projectID, agentID, userID storage.ID,
+	projectID, agentID, userID uuid.UUID,
 	text string,
 	deliveryMode executionstore.AgentInputDeliveryMode,
 	now time.Time,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	producer, err := executionstore.OmnaraActorParams(workerTestOrgID, workerTestUserPrincipal(userID))
 	if err != nil {
@@ -2125,10 +2118,10 @@ func createWorkerExecutableMachine(
 	return machine
 }
 
-func assertAgentInputQueued(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID storage.ID) {
+func assertAgentInputQueued(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID uuid.UUID) {
 	t.Helper()
 	var state string
-	var admittedEventID *storage.ID
+	var admittedEventID *uuid.UUID
 	if err := pool.QueryRow(ctx, `
 SELECT state, admitted_event_id
 FROM agent_inputs
@@ -2168,10 +2161,10 @@ func workerPermissionResolution(
 	})
 }
 
-func assertAgentInputAdmitted(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID storage.ID) {
+func assertAgentInputAdmitted(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID uuid.UUID) {
 	t.Helper()
 	var state string
-	var admittedEventID *storage.ID
+	var admittedEventID *uuid.UUID
 	if err := pool.QueryRow(ctx, `
 SELECT state, admitted_event_id
 FROM agent_inputs
@@ -2185,7 +2178,7 @@ WHERE project_id = $1 AND agent_id = $2 AND id = $3
 	}
 }
 
-func assertAgentInputCanceled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID storage.ID) {
+func assertAgentInputCanceled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, inputID uuid.UUID) {
 	t.Helper()
 	var state string
 	var canceledAt *time.Time
@@ -2208,8 +2201,8 @@ func assertTurnInputs(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID, turnID storage.ID,
-	want []storage.ID,
+	agentID, turnID uuid.UUID,
+	want []uuid.UUID,
 ) {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
@@ -2230,9 +2223,9 @@ ORDER BY event.sequence
 		t.Fatalf("query turn inputs: %v", err)
 	}
 	defer rows.Close()
-	got := make([]storage.ID, 0, len(want))
+	got := make([]uuid.UUID, 0, len(want))
 	for rows.Next() {
-		var inputID storage.ID
+		var inputID uuid.UUID
 		if err := rows.Scan(&inputID); err != nil {
 			t.Fatalf("scan turn input: %v", err)
 		}
@@ -2251,7 +2244,7 @@ ORDER BY event.sequence
 	}
 }
 
-func waitNoRuntimeLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID storage.ID) {
+func waitNoRuntimeLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -2270,7 +2263,7 @@ func waitNoRuntimeLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ag
 	}
 }
 
-func runtimeLockCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID storage.ID) int {
+func runtimeLockCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID uuid.UUID) int {
 	t.Helper()
 	var count int
 	if err := pool.QueryRow(ctx, `
@@ -2289,8 +2282,8 @@ func runtimeLockRenewedAt(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	projectID storage.ID,
-	agentID storage.ID,
+	projectID uuid.UUID,
+	agentID uuid.UUID,
 ) time.Time {
 	t.Helper()
 	var renewalAt time.Time
@@ -2309,8 +2302,8 @@ func waitRuntimeLockRenewalAfter(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	projectID storage.ID,
-	agentID storage.ID,
+	projectID uuid.UUID,
+	agentID uuid.UUID,
 	previous time.Time,
 ) {
 	t.Helper()
@@ -2330,7 +2323,7 @@ func waitRuntimeLockRenewalAfter(
 	}
 }
 
-func assertWorkerWakeup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID storage.ID) {
+func assertWorkerWakeup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	var count int
 	if err := pool.QueryRow(ctx, `
@@ -2351,7 +2344,7 @@ func waitNoWorkerWakeup(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 ) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -2384,9 +2377,9 @@ func assertAssistantEventRecorded(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	wantText string,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	rows, err := pool.Query(ctx, `
 SELECT DISTINCT output.id
@@ -2407,9 +2400,9 @@ WHERE agent.project_id = $1
 		t.Fatalf("query assistant message: %v", err)
 	}
 	defer rows.Close()
-	var outputIDs []storage.ID
+	var outputIDs []uuid.UUID
 	for rows.Next() {
-		var outputID storage.ID
+		var outputID uuid.UUID
 		if err := rows.Scan(&outputID); err != nil {
 			t.Fatalf("scan assistant message output id: %v", err)
 		}
@@ -2424,10 +2417,10 @@ WHERE agent.project_id = $1
 	return outputIDs[0]
 }
 
-func assertCompletedModelContext(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, outputID storage.ID) {
+func assertCompletedModelContext(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID, outputID uuid.UUID) {
 	t.Helper()
 	var state string
-	var linkedModelOutputID storage.ID
+	var linkedModelOutputID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 SELECT context.state,
        output.id
@@ -2456,7 +2449,7 @@ func assertModelOutputUsage(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID, outputID storage.ID,
+	agentID, outputID uuid.UUID,
 	inputTokens, uncachedInputTokens, cacheReadTokens, cacheWriteTokens, outputTokens, reasoningTokens, totalTokens int,
 ) {
 	t.Helper()
@@ -2523,7 +2516,7 @@ func assertCompletedToolCall(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	name, state string,
 ) {
 	t.Helper()
@@ -2534,7 +2527,7 @@ func assertCompletedToolCallCount(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	name, state string,
 	want int,
 ) {
@@ -2566,7 +2559,7 @@ func assertWaitingToolCall(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	name string,
 ) {
 	t.Helper()
@@ -2590,9 +2583,9 @@ func assertDeniedToolResultShape(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	toolName, reason string,
-	interactionID storage.ID,
+	interactionID uuid.UUID,
 ) {
 	t.Helper()
 	var body json.RawMessage
@@ -2614,7 +2607,7 @@ LIMIT 1
 `, workerTestProjectID, agentID, toolName).Scan(&body); err != nil {
 		t.Fatalf("query denied tool result: %v", err)
 	}
-	if interactionID != storage.NilID && strings.Contains(string(body), interactionID.String()) ||
+	if interactionID != uuid.Nil && strings.Contains(string(body), interactionID.String()) ||
 		strings.Contains(string(body), agentID.String()) ||
 		strings.Contains(string(body), workerTestProjectID.String()) {
 		t.Fatalf("denied tool result leaked internal ids: %s", body)
@@ -2632,7 +2625,7 @@ func assertStructuredQuestionResultAnswers(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	providerCallID string,
 	answers []string,
 ) {
@@ -2687,7 +2680,7 @@ LIMIT 1
 	}
 }
 
-func assertNoMachineToolCallFailed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID storage.ID) {
+func assertNoMachineToolCallFailed(t *testing.T, ctx context.Context, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*)
@@ -2714,7 +2707,7 @@ func assertStartingProcessForTool(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	toolName string,
 ) {
 	t.Helper()
@@ -2741,7 +2734,7 @@ func assertOpenStructuredQuestion(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID storage.ID,
+	agentID uuid.UUID,
 ) executionstore.AgentInteractionRecord {
 	t.Helper()
 	return assertOpenInteraction(t, ctx, store, agentID, "question")
@@ -2751,7 +2744,7 @@ func assertOpenInteraction(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	kind executionstore.AgentInteractionKind,
 ) executionstore.AgentInteractionRecord {
 	t.Helper()
@@ -2763,7 +2756,7 @@ func assertOpenInteractions(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID storage.ID,
+	agentID uuid.UUID,
 	kind executionstore.AgentInteractionKind,
 	count int,
 ) []executionstore.AgentInteractionRecord {
@@ -2789,7 +2782,7 @@ func assertOpenInteractions(
 	return filtered
 }
 
-func assertNoOpenInteractions(t *testing.T, ctx context.Context, store *storage.Store, agentID storage.ID) {
+func assertNoOpenInteractions(t *testing.T, ctx context.Context, store *storage.Store, agentID uuid.UUID) {
 	t.Helper()
 	page, err := store.Execution().ListAgentInteractionsForAgent(ctx, executionstore.ListAgentInteractionsForAgentInput{
 		ProjectID: workerTestProjectID,

@@ -75,11 +75,6 @@ export const zError = z.object({
     ])
 });
 
-export const zWarning = z.object({
-    message: z.string(),
-    code: z.enum(['missing_recommended_machine_tools'])
-});
-
 /**
  * Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
  */
@@ -206,11 +201,22 @@ export const zModelCacheRetention = z.enum([
     'long'
 ]);
 
+/**
+ * Provider-advertised list prices in USD per million tokens, as exact decimal strings. Present only when the provider publishes pricing in its model catalog (OpenRouter). Cache prices are omitted when the provider does not publish them.
+ */
+export const zDiscoveredModelPricing = z.object({
+    input_usd_per_million: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/),
+    cache_read_input_usd_per_million: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/).optional(),
+    cache_write_input_usd_per_million: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/).optional(),
+    output_usd_per_million: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/)
+});
+
 export const zDiscoveredProviderModel = z.object({
     slug: z.string(),
     display_name: z.string().optional(),
     context_window_tokens: z.int().gte(2).lte(2147483647).optional(),
-    max_output_tokens: z.int().gte(1).lte(2147483647).optional()
+    max_output_tokens: z.int().gte(1).lte(2147483647).optional(),
+    pricing: zDiscoveredModelPricing.optional()
 });
 
 /**
@@ -330,7 +336,9 @@ export const zCreateModelProviderConfigRequest = z.object({
         service: z.string().min(1).max(64).optional(),
         region: z.string().min(1).max(64).optional()
     }).optional(),
-    credential_secret_id: zSecretId
+    credential_secret_id: zSecretId,
+    headers: z.record(z.string(), z.string()).optional(),
+    secret_headers: z.record(z.string(), zSecretId).optional()
 });
 
 /**
@@ -347,7 +355,9 @@ export const zUpdateModelProviderConfigRequest = z.object({
         service: z.string().min(1).max(64).optional(),
         region: z.string().min(1).max(64).optional()
     }).optional(),
-    credential_secret_id: zSecretId.optional()
+    credential_secret_id: zSecretId.optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+    secret_headers: z.record(z.string(), zSecretId).optional()
 });
 
 export const zSecretGrantId = z.string().regex(/^sgr_[a-z2-7]{26}$/);
@@ -382,6 +392,8 @@ export const zModelProviderConfig = z.object({
         region: z.string().min(1).max(64).optional()
     }),
     credential_secret_id: zSecretId,
+    headers: z.record(z.string(), z.string()),
+    secret_headers: z.record(z.string(), zSecretId),
     created_at: zTimestamp,
     updated_at: zTimestamp
 });
@@ -454,6 +466,7 @@ export const zConfiguredModelSummary = z.object({
     model_provider_config_id: zModelProviderConfigId,
     name: zResourceName,
     provider_config: zResourceName,
+    provider_model_slug: z.string(),
     created_at: zTimestamp,
     updated_at: zTimestamp
 });
@@ -662,6 +675,11 @@ export const zSlackSetup = z.object({
     expires_at: zTimestamp
 });
 
+export const zResolveAgentConfigToolsRequest = z.object({
+    source: z.string().min(1),
+    source_format: z.enum(['yaml', 'json'])
+});
+
 export const zCreateAgentConfigRequest = z.object({
     source: z.string().min(1),
     source_format: z.enum(['yaml', 'json'])
@@ -681,6 +699,16 @@ export const zToolPermissionSelection = z.object({
     parameters: z.record(z.string(), z.unknown())
 });
 
+export const zResolvedAgentConfigTool = z.object({
+    name: z.string(),
+    enabled: z.boolean(),
+    permission: zToolPermissionSelection
+});
+
+export const zResolvedAgentConfigTools = z.object({
+    tools: z.array(zResolvedAgentConfigTool)
+});
+
 export const zToolPermissionMode = z.object({
     name: z.string(),
     label: z.string(),
@@ -696,6 +724,7 @@ export const zToolPermissionProfile = z.object({
 export const zToolCatalogEntry = z.object({
     name: z.string(),
     description: z.string(),
+    implicit: z.boolean().optional(),
     default_permission: zToolPermissionSelection,
     permission_modes: z.array(zToolPermissionMode)
 });
@@ -842,18 +871,168 @@ export const zAgentConfigModel = z.object({
     output_modalities: z.array(z.string())
 });
 
+export const zCompiledEventWebhook = z.object({
+    url: z.string(),
+    events: z.array(z.enum([
+        'agent_input',
+        'model_output',
+        'tool_result',
+        'context_checkpoint',
+        'tool_call_update'
+    ])).min(1),
+    signing_secret_id: zSecretId.optional()
+});
+
+export const zCompiledModelReasoning = z.object({
+    effort: z.string()
+});
+
+export const zCompiledAgentModel = z.object({
+    configured_model_id: zConfiguredModelId,
+    context_window_tokens: z.int().optional(),
+    default_max_output_tokens: z.int().optional(),
+    cache_retention: zModelCacheRetention.optional(),
+    reasoning: zCompiledModelReasoning.optional()
+});
+
+export const zCompiledMachineSource = z.object({
+    machine_id: zMachineId.optional(),
+    machine_pool_id: zMachinePoolId.optional(),
+    max_machines: z.int().optional(),
+    initial_num_machines: z.int().optional(),
+    delete_after_idle_minutes: z.int().optional(),
+    cwd: z.string().optional(),
+    machine_cpu: z.int().optional(),
+    machine_memory_mb: z.int().optional(),
+    env_overlay: z.record(z.string(), z.string().nullable()).optional(),
+    secret_env_overlay: z.record(z.string(), zSecretId.nullable()).optional(),
+    machine_provider_options_overlay: z.record(z.string(), z.unknown()).optional(),
+    description: z.string().optional()
+});
+
+export const zCompiledTool = z.object({
+    enabled: z.boolean(),
+    type: z.enum(['built_in', 'custom']).optional(),
+    permission: zToolPermissionSelection,
+    deferred: z.boolean().optional(),
+    description: z.string().optional(),
+    input_schema: z.record(z.string(), z.unknown()).optional()
+});
+
+export const zCompiledMcpAuthBearer = z.object({
+    type: z.enum(['bearer']),
+    secret_id: zSecretId
+});
+
+export const zCompiledMcpAuthOAuth = z.object({
+    type: z.enum(['oauth']),
+    secret_id: zSecretId
+});
+
+export const zCompiledMcpAuthSigV4 = z.object({
+    type: z.enum(['sigv4']),
+    secret_id: zSecretId,
+    service: z.string().min(1),
+    region: z.string().min(1)
+});
+
+export const zCompiledMcpAuth = z.discriminatedUnion('type', [
+    zCompiledMcpAuthBearer.extend({ type: z.literal('bearer') }),
+    zCompiledMcpAuthOAuth.extend({ type: z.literal('oauth') }),
+    zCompiledMcpAuthSigV4.extend({ type: z.literal('sigv4') })
+]);
+
+export const zCompiledMcpTool = z.object({
+    enabled: z.boolean().optional(),
+    permission: zToolPermissionSelection.optional(),
+    deferred: z.boolean().optional()
+});
+
+export const zCompiledMcpServer = z.object({
+    url: z.string(),
+    auth: zCompiledMcpAuth.optional(),
+    default_enabled: z.boolean(),
+    permission: zToolPermissionSelection,
+    deferred: z.boolean().optional(),
+    tools: z.record(z.string(), zCompiledMcpTool).optional()
+});
+
+export const zCompiledSkill = z.object({
+    id: zSkillId
+});
+
+export const zCompiledSubagentModel = z.object({
+    configured_model_id: zConfiguredModelId.optional(),
+    context_window_tokens: z.int().optional(),
+    default_max_output_tokens: z.int().optional(),
+    cache_retention: zModelCacheRetention.optional(),
+    reasoning: zCompiledModelReasoning.optional()
+});
+
+export const zCompiledSelfSubagent = z.object({
+    type: z.enum(['self']),
+    description: z.string().optional(),
+    model: zCompiledSubagentModel.optional(),
+    instruction_append: z.string().optional(),
+    max_instances: z.int().optional(),
+    archive_after_idle_minutes: z.int().optional()
+});
+
+export const zCompiledProfileSubagent = z.object({
+    type: z.enum(['profile']),
+    profile_id: zAgentProfileId,
+    description: z.string().optional(),
+    model: zCompiledSubagentModel.optional(),
+    instruction_append: z.string().optional(),
+    max_instances: z.int().optional(),
+    archive_after_idle_minutes: z.int().optional()
+});
+
+export const zCompiledSubagent = z.discriminatedUnion('type', [
+    zCompiledSelfSubagent.extend({ type: z.literal('self') }),
+    zCompiledProfileSubagent.extend({ type: z.literal('profile') })
+]);
+
+/**
+ * Read-only saved compiled configuration, including default tools and derived subagent overrides.
+ */
+export const zCompiledAgentConfig = z.object({
+    version: z.string().optional(),
+    instruction: z.string(),
+    model: zCompiledAgentModel,
+    machine_sources: z.array(zCompiledMachineSource).optional(),
+    tools: z.record(z.string(), zCompiledTool).optional(),
+    mcp: z.record(z.string(), zCompiledMcpServer).optional(),
+    event_webhook: zCompiledEventWebhook.optional(),
+    skills: z.array(zCompiledSkill).optional(),
+    subagents: z.record(z.string(), zCompiledSubagent).optional(),
+    max_subagents: z.int().optional(),
+    max_depth: z.int().optional()
+});
+
+export const zAgentConfigSummary = z.object({
+    id: zAgentConfigId,
+    org_id: zOrganizationId,
+    project_id: zProjectId,
+    source: z.string().optional(),
+    source_format: z.enum(['yaml', 'json']).optional(),
+    effective_definition_hash: z.string(),
+    model: zAgentConfigModel,
+    instruction_hash: z.string().optional(),
+    created_at: zTimestamp
+});
+
 export const zAgentConfig = z.object({
     id: zAgentConfigId,
     org_id: zOrganizationId,
     project_id: zProjectId,
     source: z.string().optional(),
     source_format: z.enum(['yaml', 'json']).optional(),
-    compiler_version: z.string().optional(),
     effective_definition_hash: z.string(),
     model: zAgentConfigModel,
     instruction_hash: z.string().optional(),
-    warnings: z.array(zWarning).min(1).optional(),
-    created_at: zTimestamp
+    created_at: zTimestamp,
+    compiled_definition: zCompiledAgentConfig
 });
 
 export const zCreateAgentProfileRequest = z.object({
@@ -870,6 +1049,18 @@ export const zRenameAgentProfileRequest = z.object({
     name: zResourceName
 });
 
+export const zAgentProfileSummary = z.object({
+    id: zAgentProfileId,
+    org_id: zOrganizationId,
+    project_id: zProjectId,
+    name: zResourceName,
+    current_config_id: zAgentConfigId,
+    current_generation: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
+    created_at: zTimestamp,
+    updated_at: zTimestamp,
+    current_config: zAgentConfigSummary
+});
+
 export const zAgentProfile = z.object({
     id: zAgentProfileId,
     org_id: zOrganizationId,
@@ -877,13 +1068,13 @@ export const zAgentProfile = z.object({
     name: zResourceName,
     current_config_id: zAgentConfigId,
     current_generation: z.int().min(-2147483648, { error: 'Invalid value: Expected int32 to be >= -2147483648' }).max(2147483647, { error: 'Invalid value: Expected int32 to be <= 2147483647' }),
-    current_config: zAgentConfig,
     created_at: zTimestamp,
-    updated_at: zTimestamp
+    updated_at: zTimestamp,
+    current_config: zAgentConfig
 });
 
 export const zListAgentProfilesResponse = z.object({
-    data: z.array(zAgentProfile),
+    data: z.array(zAgentProfileSummary),
     next_cursor: z.string().nullable()
 });
 
@@ -1111,7 +1302,6 @@ export const zAgentMachineBinding = z.object({
     project_id: zProjectId,
     agent_id: zAgentId,
     machine_id: zMachineId,
-    machine_ref: z.string(),
     binding_kind: zAgentMachineBindingKind,
     state: zAgentMachineBindingState,
     description: z.string(),
@@ -1123,13 +1313,14 @@ export const zAgentMachineBinding = z.object({
 });
 
 /**
- * The machine's most recent daemon-reported failure. A single slot, overwritten by newer reports and cleared when the daemon recovers.
+ * The machine's most recent daemon-reported failure. A single slot, overwritten by newer reports. Runtime crash reports remain as historical diagnostics; recovery may clear other failure stages.
  */
 export const zMachineFailureReport = z.object({
     stage: z.enum([
         'startup_script',
         'daemon_install',
         'daemon_update',
+        'daemon_runtime',
         'daemon_uninstall',
         'daemon_uninstalled'
     ]),
@@ -1350,7 +1541,7 @@ export const zToolCall = z.object({
 });
 
 /**
- * An ephemeral notification that a tool call entered a lifecycle state. Sent for the streamed agent and for every subagent beneath it, so questions, permission requests, and custom tool calls anywhere in the tree surface here; query the list endpoints with `include_subagents` for the current rows.
+ * A notification that a tool call entered a lifecycle state. On the event stream, this is ephemeral and sent for the streamed agent and every subagent beneath it, so questions, permission requests, and custom tool calls anywhere in the tree surface here; query the list endpoints with `include_subagents` for the current rows.
  */
 export const zToolCallUpdate = z.object({
     tool_call_id: zToolCallId,
@@ -1435,6 +1626,26 @@ export const zContextCheckpointEvent = z.object({
     created_at: zTimestamp
 });
 
+export const zEventWebhookAgentInputEvent = z.object({
+    event: z.enum(['agent_input']),
+    data: zAgentInputEvent
+});
+
+export const zEventWebhookToolResultEvent = z.object({
+    event: z.enum(['tool_result']),
+    data: zToolResultEvent
+});
+
+export const zEventWebhookContextCheckpointEvent = z.object({
+    event: z.enum(['context_checkpoint']),
+    data: zContextCheckpointEvent
+});
+
+export const zEventWebhookToolCallUpdate = z.object({
+    event: z.enum(['tool_call_update']),
+    data: zToolCallUpdate
+});
+
 export const zModelOutputTextStreamBlock = z.object({
     kind: z.enum(['text'])
 });
@@ -1513,6 +1724,22 @@ export const zModelOutputEvent = z.object({
     provider_metadata: z.record(z.string(), z.unknown()).optional(),
     created_at: zTimestamp
 });
+
+export const zEventWebhookModelOutputEvent = z.object({
+    event: z.enum(['model_output']),
+    data: zModelOutputEvent
+});
+
+/**
+ * JSON body posted to an agent configuration's event webhook. Each event name determines its data schema.
+ */
+export const zEventWebhookPayload = z.discriminatedUnion('event', [
+    zEventWebhookAgentInputEvent.extend({ event: z.literal('agent_input') }),
+    zEventWebhookModelOutputEvent.extend({ event: z.literal('model_output') }),
+    zEventWebhookToolResultEvent.extend({ event: z.literal('tool_result') }),
+    zEventWebhookContextCheckpointEvent.extend({ event: z.literal('context_checkpoint') }),
+    zEventWebhookToolCallUpdate.extend({ event: z.literal('tool_call_update') })
+]);
 
 export const zAgentEvent = z.discriminatedUnion('event_kind', [
     zAgentInputEvent.extend({ event_kind: z.literal('agent_input') }),
@@ -2569,10 +2796,110 @@ export const zListProjectsResponse = z.object({
     next_cursor: z.string().nullable()
 });
 
+export const zOrgOverviewAgentProfileReference = z.object({
+    id: zAgentProfileId,
+    name: zResourceName,
+    agent_count: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+/**
+ * Activity since the start of today in `timezone`, across the readable projects in `projects`.
+ */
+export const zOrgOverviewToday = z.object({
+    agents_created: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    messages_sent: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zOrgOverviewUsageDayModel = z.object({
+    id: zConfiguredModelId,
+    tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zOrgOverviewUsageDayProfile = z.object({
+    id: zAgentProfileId.optional(),
+    tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+/**
+ * Summed token counts across the tallied model calls. Input totals are the sum of uncached, cache-read, and cache-write tokens; output totals include reasoning tokens.
+ */
+export const zUsageTokenTotals = z.object({
+    input_tokens_total: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    uncached_input_tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    cache_read_input_tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    cache_write_input_tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    output_tokens_total: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    reasoning_output_tokens: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zUsageCostTotals = z.object({
+    provider_reported_usd: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/),
+    model_calls_with_reported_cost: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zUsageTotals = z.object({
+    model_calls: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    tokens: zUsageTokenTotals,
+    cost: zUsageCostTotals
+});
+
+export const zOrgOverviewUsageModel = z.object({
+    id: zConfiguredModelId,
+    name: zResourceName,
+    totals: zUsageTotals
+});
+
+export const zOrgOverviewUsageProfile = z.object({
+    id: zAgentProfileId.optional(),
+    name: zResourceName.optional(),
+    totals: zUsageTotals
+});
+
+export const zOrgOverviewUsageDay = z.object({
+    start: zTimestamp,
+    totals: zUsageTotals,
+    models: z.array(zOrgOverviewUsageDayModel),
+    profiles: z.array(zOrgOverviewUsageDayProfile)
+});
+
+/**
+ * Model usage over the last 30 days in `timezone`, today included, across the readable projects in `projects`.
+ */
+export const zOrgOverviewUsage = z.object({
+    totals: zUsageTotals,
+    active_agents: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    models: z.array(zOrgOverviewUsageModel),
+    profiles: z.array(zOrgOverviewUsageProfile),
+    days: z.array(zOrgOverviewUsageDay)
+});
+
 export const zOrgOverviewResponse = z.object({
     projects: z.array(zVisibleProject),
     recent_agents: z.array(zAgent),
-    recent_agent_profiles: z.array(zAgentProfile)
+    recent_agent_profiles: z.array(zAgentProfileSummary),
+    referenced_agent_profiles: z.array(zOrgOverviewAgentProfileReference),
+    today: zOrgOverviewToday,
+    usage: zOrgOverviewUsage
+});
+
+export const zUsageModel = z.object({
+    configured_model_id: zConfiguredModelId,
+    name: zResourceName,
+    provider_model_slug: z.string(),
+    model_provider_config_id: zModelProviderConfigId,
+    model_provider_config_name: zResourceName
+});
+
+export const zModelUsageTotals = z.object({
+    model: zUsageModel,
+    model_calls: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    tokens: zUsageTokenTotals,
+    cost: zUsageCostTotals
+});
+
+export const zUsageReport = z.object({
+    totals: zUsageTotals,
+    by_model: z.array(zModelUsageTotals)
 });
 
 export const zCurrentUserIdentity = z.object({
@@ -2633,6 +2960,26 @@ export const zProjectMembershipGrant = z.object({
 export const zListProjectMembershipGrantsResponse = z.object({
     data: z.array(zProjectMembershipGrant)
 });
+
+/**
+ * Only tally model calls started at or after this instant. Omit to start from the earliest recorded call.
+ */
+export const zUsageSince = z.iso.datetime({ offset: true });
+
+/**
+ * Only tally model calls started before this instant. Must be later than `since` when both are given. Omit to include calls up to now.
+ */
+export const zUsageUntil = z.iso.datetime({ offset: true });
+
+/**
+ * Only tally model calls from these projects. Cannot be combined with `exclude_project_ids`.
+ */
+export const zUsageIncludeProjectIds = z.array(zProjectId).min(1).max(100);
+
+/**
+ * Tally model calls from every project except these. Cannot be combined with `include_project_ids`.
+ */
+export const zUsageExcludeProjectIds = z.array(zProjectId).min(1).max(100);
 
 /**
  * Idempotency key for replay-safe mutating requests.
@@ -2760,6 +3107,7 @@ export const zRecordMachineFailureQuery = z.object({
         'startup_script',
         'daemon_install',
         'daemon_update',
+        'daemon_runtime',
         'daemon_uninstall',
         'daemon_uninstalled'
     ]),
@@ -2841,10 +3189,30 @@ export const zGetOrgOverviewPath = z.object({
     orgID: zOrganizationId
 });
 
+export const zGetOrgOverviewQuery = z.object({
+    timezone: z.string().max(64).optional().default('UTC')
+});
+
 /**
  * Overview data for the organization.
  */
 export const zGetOrgOverviewResponse = zOrgOverviewResponse;
+
+export const zGetOrgUsagePath = z.object({
+    orgID: zOrganizationId
+});
+
+export const zGetOrgUsageQuery = z.object({
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
+    include_project_ids: z.array(zProjectId).min(1).max(100).optional(),
+    exclude_project_ids: z.array(zProjectId).min(1).max(100).optional()
+});
+
+/**
+ * Usage totals for the organization.
+ */
+export const zGetOrgUsageResponse = zUsageReport;
 
 export const zListVisibleProjectsPath = z.object({
     orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
@@ -2884,6 +3252,21 @@ export const zDeleteProjectPath = z.object({
  * Project deleted.
  */
 export const zDeleteProjectResponse = z.void();
+
+export const zGetProjectUsagePath = z.object({
+    orgID: zOrganizationId,
+    projectID: zProjectId
+});
+
+export const zGetProjectUsageQuery = z.object({
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional()
+});
+
+/**
+ * Usage totals for the project.
+ */
+export const zGetProjectUsageResponse = zUsageReport;
 
 export const zListOrgMembersPath = z.object({
     orgID: z.string().regex(/^org_[a-z2-7]{26}$/)
@@ -3372,6 +3755,18 @@ export const zDeleteIntegrationInstallPath = z.object({
  */
 export const zDeleteIntegrationInstallResponse = z.void();
 
+export const zResolveAgentConfigToolsBody = zResolveAgentConfigToolsRequest;
+
+export const zResolveAgentConfigToolsPath = z.object({
+    orgID: zOrganizationId,
+    projectID: zProjectId
+});
+
+/**
+ * Resolved config tools.
+ */
+export const zResolveAgentConfigToolsResponse = zResolvedAgentConfigTools;
+
 export const zCreateAgentConfigBody = zCreateAgentConfigRequest;
 
 export const zCreateAgentConfigPath = z.object({
@@ -3491,6 +3886,23 @@ export const zRenameAgentProfilePath = z.object({
  * Agent profile renamed.
  */
 export const zRenameAgentProfileResponse = zAgentProfile;
+
+export const zGetAgentProfileUsagePath = z.object({
+    orgID: zOrganizationId,
+    projectID: zProjectId,
+    agentProfileID: zAgentProfileId
+});
+
+export const zGetAgentProfileUsageQuery = z.object({
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
+    include_subagents: z.boolean().optional()
+});
+
+/**
+ * Usage totals for the agent profile.
+ */
+export const zGetAgentProfileUsageResponse = zUsageReport;
 
 export const zUpdateAgentProfileBody = zUpdateAgentProfileRequest;
 
@@ -3652,6 +4064,23 @@ export const zGetAgentPath = z.object({
  * Agent.
  */
 export const zGetAgentResponse2 = zGetAgentResponse;
+
+export const zGetAgentUsagePath = z.object({
+    orgID: zOrganizationId,
+    projectID: zProjectId,
+    agentID: zAgentId
+});
+
+export const zGetAgentUsageQuery = z.object({
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
+    include_subagents: z.boolean().optional()
+});
+
+/**
+ * Usage totals for the agent.
+ */
+export const zGetAgentUsageResponse = zUsageReport;
 
 export const zArchiveAgentPath = z.object({
     orgID: z.string().regex(/^org_[a-z2-7]{26}$/),

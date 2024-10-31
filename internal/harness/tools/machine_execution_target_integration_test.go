@@ -14,8 +14,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/omnara-ai/omnara/internal/agentconfig"
-	"github.com/omnara-ai/omnara/internal/interactionform"
 	"github.com/omnara-ai/omnara/internal/machinepool/provideroptions"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
@@ -24,6 +22,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/management"
+	"github.com/omnara-ai/omnara/internal/storage/patch"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/omnara-ai/omnara/internal/testutil/integrationdb"
@@ -31,6 +30,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/testutil/storagetest"
 	"github.com/omnara-ai/omnara/internal/toolcatalog"
 	"github.com/omnara-ai/omnara/internal/toolpermission"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -46,7 +46,7 @@ func toolsTestClaimInput() executionstore.ClaimNextAgentWorkInput {
 	}
 }
 
-func toolsTestID(seed string) storage.ID {
+func toolsTestID(seed string) uuid.UUID {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("omnara-tools-integration:"+seed))
 }
 
@@ -79,7 +79,7 @@ func (providers toolsTestMachinePoolProviders) BuildMachineProvisioningIntent(
 	return machineProvisioning, nil
 }
 
-func TestResolveMachineExecutionTargetUsesMachineRefSelection(t *testing.T) {
+func TestResolveMachineExecutionTargetUsesMachineIDSelection(t *testing.T) {
 	ctx := context.Background()
 	pool := integrationdb.OpenMigratedPool(t, ctx, "../../../migrations")
 	store := storage.NewStore(
@@ -137,21 +137,25 @@ func TestResolveMachineExecutionTargetUsesMachineRefSelection(t *testing.T) {
 
 	executor := Executor{Store: store}
 	turn := Turn{ProjectID: toolsTestProjectID, AgentID: agent.ID}
-	if _, err := executor.ResolveMachineExecutionTarget(ctx, turn, ""); !errors.Is(err, ErrMachineSelectionRequired) {
+	if _, err := executor.ResolveMachineExecutionTarget(ctx, turn, uuid.Nil); !errors.Is(
+		err, ErrMachineSelectionRequired,
+	) {
 		t.Fatalf("omitted selector with multiple bindings error = %v, want %v", err, ErrMachineSelectionRequired)
 	}
-	binding, err := executor.ResolveMachineExecutionTarget(ctx, turn, firstAgentBinding.MachineRef)
+	binding, err := executor.ResolveMachineExecutionTarget(
+		ctx, turn, firstAgentBinding.MachineID,
+	)
 	if err != nil {
 		t.Fatalf("resolve explicit first binding: %v", err)
 	}
 	if binding.ID != firstAgentBinding.ID || binding.Cwd != "/first" {
 		t.Fatalf("resolved wrong explicit binding: %+v want %s", binding, firstAgentBinding.ID)
 	}
-	if _, err := executor.ResolveMachineExecutionTarget(ctx, turn, "mchr-missing"); !errors.Is(
+	if _, err := executor.ResolveMachineExecutionTarget(ctx, turn, integrationToolTestID("missing")); !errors.Is(
 		err,
-		ErrMachineRefUnavailable,
+		ErrMachineIDUnavailable,
 	) {
-		t.Fatalf("unavailable selector error = %v, want %v", err, ErrMachineRefUnavailable)
+		t.Fatalf("unavailable selector error = %v, want %v", err, ErrMachineIDUnavailable)
 	}
 	singleLaunch := createToolsRuntimeAgentWithMachineSources(
 		t,
@@ -169,12 +173,12 @@ func TestResolveMachineExecutionTargetUsesMachineRefSelection(t *testing.T) {
 	binding, err = executor.ResolveMachineExecutionTarget(
 		ctx,
 		Turn{ProjectID: toolsTestProjectID, AgentID: singleAgent.ID},
-		"",
+		uuid.Nil,
 	)
 	if err != nil {
 		t.Fatalf("resolve omitted single binding: %v", err)
 	}
-	if binding.ID != singleBinding.ID || binding.MachineRef == "" {
+	if binding.ID != singleBinding.ID || binding.MachineID == uuid.Nil {
 		t.Fatalf("resolved wrong single binding: %+v want %s", binding, singleBinding.ID)
 	}
 	_ = secondAgentBinding
@@ -216,12 +220,10 @@ tools:
 	)
 	config, err := fixture.Store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               toolsTestProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -241,9 +243,13 @@ tools:
 		launch.MachineBindings[0].BindingKind != executionstore.MachineBindingKindExplicit {
 		t.Fatalf("BYO observation launch bindings = %+v", launch.MachineBindings)
 	}
-	machineRef := launch.MachineBindings[0].MachineRef
+	machineID := machinePublicIDForTest(t, launch.MachineBindings[0].MachineID)
 
 	listCall := model.ToolCall{ID: "call_observe-byo-list", Name: "list_machines", Input: json.RawMessage(`{}`)}
+	continuationListCall := model.ToolCall{
+		ID: "call_observe-byo-list-next", Name: "list_machines",
+		Input: json.RawMessage(`{"cursor":"` + machineID + `"}`),
+	}
 	inspectCall := model.ToolCall{ID: "call_observe-byo-inspect", Name: "inspect_machine", Input: json.RawMessage(`{}`)}
 	mixedInspectCall := model.ToolCall{
 		ID:    "call_observe-byo-mixed-inspect",
@@ -259,7 +265,7 @@ tools:
 	staleInspectCall := model.ToolCall{
 		ID:    "call_observe-byo-stale-inspect",
 		Name:  "inspect_machine",
-		Input: json.RawMessage(`{"machine_ref":"mchr-missing"}`),
+		Input: json.RawMessage(`{"machine_id":"mch_aaaaaaaaaaaaaaaaaaaaaaaaae"}`),
 	}
 	toolCalls, lock, admitted, contextRecord := recordMachineToolCallsForDirectStoreTest(
 		t,
@@ -276,10 +282,11 @@ tools:
 			createPoolCall,
 			alwaysAllowMixedInspectCall,
 			staleInspectCall,
+			continuationListCall,
 		},
 		fixture.Now.Add(7*time.Second),
 	)
-	for _, index := range []int{0, 3, 4, 5} {
+	for _, index := range []int{0, 3, 4, 5, 6} {
 		if _, err := fixture.Store.Execution().MarkToolCallReady(
 			ctx,
 			executionstore.MarkToolCallReadyInput{
@@ -328,7 +335,17 @@ tools:
 	if !ok {
 		t.Fatalf("list_machines entry = %+v", machines[0])
 	}
-	assertBYOMachineObservationResult(t, listed, machineRef, byo.DisplayName)
+	assertBYOMachineObservationResult(t, listed, machineID, byo.DisplayName)
+
+	continued, err := executor.Dispatch(ctx, turn, continuationListCall)
+	if err != nil {
+		t.Fatalf("dispatch list continuation: %v", err)
+	}
+	continuedBody := toolResultMapFromTestParts(t, continued.ContentParts)
+	remaining, ok := continuedBody["machines"].([]any)
+	if !ok || len(remaining) != 0 || continuedBody["next_cursor"] != nil {
+		t.Fatalf("unexpected final machine page: %+v", continuedBody)
+	}
 
 	interaction, found, err := fixture.Store.Execution().GetAgentInteractionByToolCallKind(
 		ctx,
@@ -343,36 +360,14 @@ tools:
 	if !found {
 		t.Fatal("inspect_machine permission interaction not found")
 	}
-	resolvedBy, err := executionstore.OmnaraActorParams(
-		toolsTestOrgID,
-		toolsTestUserPrincipal(fixture.UserID),
-	)
-	if err != nil {
-		t.Fatalf("build inspect_machine permission actor: %v", err)
-	}
-	if _, err := fixture.Store.Execution().ResolveAgentInteraction(
-		ctx,
-		executionstore.ResolveAgentInteractionInput{
-			ProjectID: toolsTestProjectID,
-			AgentID:   launch.Agent.ID,
-			ID:        interaction.ID,
-			Resolution: interactionform.Resolution{
-				Answers: []interactionform.Answer{{
-					OptionIndices: []int{toolpermission.AllowOptionIndex},
-				}},
-			},
-			Actor: resolvedBy,
-		},
-	); err != nil {
-		t.Fatalf("approve inspect_machine permission: %v", err)
-	}
+	approveToolPermissionForTest(t, ctx, fixture.Store.Execution(), interaction, fixture.UserID)
 	executor.Now = func() time.Time { return fixture.Now.Add(9 * time.Second) }
 	inspectResult, err := executor.Dispatch(ctx, turn, inspectCall)
 	if err != nil {
 		t.Fatalf("dispatch inspect_machine: %v", err)
 	}
 	inspected := toolResultMapFromTestParts(t, inspectResult.ContentParts)
-	assertBYOMachineObservationResult(t, inspected, machineRef, byo.DisplayName)
+	assertBYOMachineObservationResult(t, inspected, machineID, byo.DisplayName)
 
 	if _, err := storagetest.ExecuteToolCallCommand[executionstore.CreatePoolMachineResult](
 		ctx,
@@ -404,7 +399,7 @@ tools:
 	}
 	mixedBody := toolResultMapFromTestParts(t, mixedResult.ContentParts)
 	if mixedBody["error_code"] != ErrMachineSelectionRequired.Error() ||
-		mixedBody["error"] != "machine_ref is required when multiple machines are available" ||
+		mixedBody["error"] != "machine_id is required when multiple machines are available" ||
 		mixedBody["next_action"] != toolcatalog.ToolNameListMachines {
 		t.Fatalf("mixed-source inspect_machine result = %+v", mixedBody)
 	}
@@ -428,8 +423,8 @@ tools:
 		t.Fatalf("dispatch stale inspect_machine: %v", err)
 	}
 	staleBody := toolResultMapFromTestParts(t, staleResult.ContentParts)
-	if staleBody["error_code"] != ErrMachineRefUnavailable.Error() ||
-		staleBody["error"] != "machine_ref is unavailable" ||
+	if staleBody["error_code"] != ErrMachineIDUnavailable.Error() ||
+		staleBody["error"] != "machine_id is unavailable" ||
 		staleBody["next_action"] != toolcatalog.ToolNameListMachines {
 		t.Fatalf("stale inspect_machine result = %+v", staleBody)
 	}
@@ -438,10 +433,10 @@ tools:
 func assertBYOMachineObservationResult(
 	t *testing.T,
 	result map[string]any,
-	machineRef, displayName string,
+	machineID, displayName string,
 ) {
 	t.Helper()
-	if result["machine_ref"] != machineRef || result["source_kind"] != "byo" ||
+	if result["machine_id"] != machineID || result["source_kind"] != "byo" ||
 		result["binding_kind"] != "explicit" || result["binding_state"] != "attached" ||
 		result["display_name"] != displayName || result["cwd"] != "/checkout" ||
 		result["connection_state"] != "online" || result["executable"] != true {
@@ -471,19 +466,16 @@ func TestApprovedImplicitMachineTargetChangeFailsTerminally(t *testing.T) {
 		"approved-target-second",
 		fixture.Now.Add(6*time.Second),
 	)
-	firstRef := "mchr-aprvd1"
-	secondRef := "mchr-aprvd2"
 	if _, err := fixture.Pool.Exec(
 		ctx,
 		`INSERT INTO agent_machine_bindings(
-		   org_id, project_id, agent_id, machine_id, machine_ref, binding_kind, state, created_at, updated_at
+		   org_id, project_id, agent_id, machine_id, binding_kind, state, created_at, updated_at
 		 )
-		 VALUES ($1, $2, $3, $4, $5, 'explicit', 'attached', $6, $6)`,
+		 VALUES ($1, $2, $3, $4, 'explicit', 'attached', $5, $5)`,
 		toolsTestOrgID,
 		toolsTestProjectID,
 		fixture.Launch.Agent.ID,
 		first.MachineID,
-		firstRef,
 		fixture.Now.Add(7*time.Second),
 	); err != nil {
 		t.Fatalf("attach first machine: %v", err)
@@ -538,27 +530,7 @@ func TestApprovedImplicitMachineTargetChangeFailsTerminally(t *testing.T) {
 	if !found {
 		t.Fatal("run permission interaction not found")
 	}
-	resolution := interactionform.Resolution{
-		Answers: []interactionform.Answer{{
-			OptionIndices: []int{toolpermission.AllowOptionIndex},
-		}},
-	}
-	resolvedBy, err := executionstore.OmnaraActorParams(toolsTestOrgID, toolsTestUserPrincipal(fixture.UserID))
-	if err != nil {
-		t.Fatalf("omnara actor params: %v", err)
-	}
-	if _, err := fixture.Store.Execution().ResolveAgentInteraction(
-		ctx,
-		executionstore.ResolveAgentInteractionInput{
-			ProjectID:  toolsTestProjectID,
-			AgentID:    fixture.Launch.Agent.ID,
-			ID:         interaction.ID,
-			Resolution: resolution,
-			Actor:      resolvedBy,
-		},
-	); err != nil {
-		t.Fatalf("approve run permission: %v", err)
-	}
+	approveToolPermissionForTest(t, ctx, fixture.Store.Execution(), interaction, fixture.UserID)
 	if _, err := fixture.Pool.Exec(
 		ctx,
 		`UPDATE agent_machine_bindings
@@ -574,14 +546,13 @@ func TestApprovedImplicitMachineTargetChangeFailsTerminally(t *testing.T) {
 	if _, err := fixture.Pool.Exec(
 		ctx,
 		`INSERT INTO agent_machine_bindings(
-		   org_id, project_id, agent_id, machine_id, machine_ref, binding_kind, state, created_at, updated_at
+		   org_id, project_id, agent_id, machine_id, binding_kind, state, created_at, updated_at
 		 )
-		 VALUES ($1, $2, $3, $4, $5, 'explicit', 'attached', $6, $6)`,
+		 VALUES ($1, $2, $3, $4, 'explicit', 'attached', $5, $5)`,
 		toolsTestOrgID,
 		toolsTestProjectID,
 		fixture.Launch.Agent.ID,
 		second.MachineID,
-		secondRef,
 		fixture.Now.Add(11*time.Second),
 	); err != nil {
 		t.Fatalf("attach replacement machine target: %v", err)
@@ -725,10 +696,10 @@ func TestProcessToolMachineSelectionFailureKeepsStructuredPayload(t *testing.T) 
 		toolsTestProjectID,
 		agent.ID,
 		lock,
-		[]storage.ID{input.ID},
+		[]uuid.UUID{input.ID},
 		snapshot.AgentConfig.ID,
 		admitted.Events[0].Sequence,
-		storage.NilID,
+		uuid.Nil,
 	)
 	contextRecord := modelCall.Context
 	call := model.ToolCall{ID: "call_selection", Name: "run_command", Input: json.RawMessage(`{"command":"pwd"}`)}
@@ -826,20 +797,86 @@ func TestProcessToolMachineSelectionFailureKeepsStructuredPayload(t *testing.T) 
 		t.Fatalf("decode result content: %v; raw=%s", unmarshalErr, parts[0].Value)
 	}
 	if body["error_code"] != ErrMachineSelectionRequired.Error() ||
-		body["error"] != "machine_ref is required when multiple machines are available" ||
+		body["error"] != "machine_id is required when multiple machines are available" ||
 		body["next_action"] != toolcatalog.ToolNameListMachines {
 		t.Fatalf("unexpected structured machine selection result: %+v", body)
+	}
+}
+
+func TestCreateMachineRejectsInvalidOverridesBeforeApproval(t *testing.T) {
+	ctx := context.Background()
+	fixture := newMachineDispatchFixture(t, ctx, "create-approval-sizing")
+	calls := []model.ToolCall{
+		{ID: "cpu-too-large", Name: "create_machine", Input: json.RawMessage(`{"cpu":2}`)},
+		{ID: "memory-too-large", Name: "create_machine", Input: json.RawMessage(`{"memory_mb":2048}`)},
+		{ID: "valid-size", Name: "create_machine", Input: json.RawMessage(`{"cpu":1,"memory_mb":1024}`)},
+	}
+	toolCalls, lock, admitted, contextRecord := recordMachineToolCallsForDirectStoreTest(
+		t, ctx, fixture.Store, fixture.Launch.Agent.ID, fixture.UserID, fixture.Config.ID,
+		"create-approval-sizing", calls, fixture.Now.Add(5*time.Second),
+	)
+	turn := Turn{
+		ProjectID: toolsTestProjectID, AgentID: fixture.Launch.Agent.ID,
+		SourceEventID: admitted.Events[0].ID, RuntimeLockID: lock.ID, ModelCallContextID: contextRecord.ID,
+		Tools: map[string]ToolSpec{
+			"create_machine": {Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAsk)},
+		},
+	}
+	executor := Executor{Store: fixture.Store, Now: func() time.Time { return fixture.Now.Add(6 * time.Second) }}
+	for i, call := range calls {
+		t.Run(call.ID, func(t *testing.T) {
+			if err := executor.PrepareToolCallPermission(ctx, turn, call); err != nil {
+				t.Fatalf("prepare create permission: %v", err)
+			}
+			interaction, found, err := fixture.Store.Execution().GetAgentInteractionByToolCallKind(
+				ctx, toolsTestProjectID, fixture.Launch.Agent.ID, toolCalls[i].ID,
+				executionstore.AgentInteractionKindPermission,
+			)
+			valid := call.ID == "valid-size"
+			if err != nil || found != valid {
+				t.Fatalf("permission interaction: found=%t want=%t err=%v", found, valid, err)
+			}
+			if valid {
+				var request toolpermission.Request
+				require.NoError(t, json.Unmarshal(interaction.Request, &request))
+				require.JSONEq(t,
+					`{"machine_pool_id":"`+poolPublicIDForTest(t, fixture.MachinePool.ID)+`","cpu":1,"memory_mb":1024}`,
+					string(request.Authorization.Input),
+				)
+			}
+			record, err := fixture.Store.Execution().GetToolCall(
+				ctx, toolsTestProjectID, fixture.Launch.Agent.ID, toolCalls[i].ID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if valid {
+				if record.State != executionstore.ToolCallStateAwaitingPermission {
+					t.Fatalf("valid tool call state = %s", record.State)
+				}
+			} else if record.State != executionstore.ToolCallStateCompleted ||
+				record.Outcome != executionstore.ToolResultOutcomeFailed {
+				t.Fatalf("invalid tool call state=%s outcome=%s", record.State, record.Outcome)
+			}
+		})
 	}
 }
 
 func TestCreateMachineCompletesWithDurableProvisioningIntent(t *testing.T) {
 	ctx := context.Background()
 	fixture := newMachineDispatchFixture(t, ctx, "create-boundary")
-	call := model.ToolCall{ID: "call_create-boundary", Name: "create_machine", Input: json.RawMessage(`{}`)}
+	if _, err := fixture.Store.Execution().UpdateMachinePool(ctx, executionstore.UpdateMachinePoolInput{
+		OrgID: toolsTestOrgID, ID: fixture.MachinePool.ID,
+		MaxMachineCPU:      patch.NullableInt{Set: true, Value: new(2)},
+		MaxMachineMemoryMB: patch.NullableInt{Set: true, Value: new(2048)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := model.ToolCall{ID: "call_create-boundary", Name: "create_machine", Input: json.RawMessage(`{"cpu":2,"memory_mb":2048}`)}
 	badCall := model.ToolCall{
 		ID:    "call_create-boundary-invalid-pool",
 		Name:  "create_machine",
-		Input: json.RawMessage(`{"machine_pool_name":"missing"}`),
+		Input: json.RawMessage(`{"machine_pool_id":"mpo_aaaaaaaaaaaaaaaaaaaaaaaaae"}`),
 	}
 	toolCalls, lock, admitted, contextRecord := createMachineToolCallsForDirectStoreTest(
 		t,
@@ -865,9 +902,9 @@ func TestCreateMachineCompletesWithDurableProvisioningIntent(t *testing.T) {
 			},
 		},
 	}
-	provisionCalls := make(chan storage.ID, 1)
+	provisionCalls := make(chan uuid.UUID, 1)
 	manager := testPoolMachineManager{
-		provision: func(ctx context.Context, orgID, machineID storage.ID) error {
+		provision: func(ctx context.Context, orgID, machineID uuid.UUID) error {
 			if orgID != toolsTestOrgID {
 				return errors.New("provision manager received the wrong organization")
 			}
@@ -917,6 +954,9 @@ func TestCreateMachineCompletesWithDurableProvisioningIntent(t *testing.T) {
 		t.Fatal("create machine retained runtime ownership for reconciliation")
 	}
 	body := toolResultMapFromTestParts(t, result.ContentParts)
+	if body["cpu"] != float64(2) || body["memory_mb"] != float64(2048) {
+		t.Fatalf("machine size = %+v", body)
+	}
 	if body["lifecycle_state"] != "provisioning" ||
 		body["connection_state"] != "offline" || body["ready"] != false {
 		t.Fatalf("create machine result = %+v", body)
@@ -929,6 +969,10 @@ func TestCreateMachineCompletesWithDurableProvisioningIntent(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("load provisioning machine: %v", err)
+	}
+	if machine.Machine.CPU == nil || *machine.Machine.CPU != 2 ||
+		machine.Machine.MemoryMB == nil || *machine.Machine.MemoryMB != 2048 {
+		t.Fatalf("persisted size = %+v", machine.Machine)
 	}
 	if machine.Machine.LifecycleState != "provisioning" || machine.Machine.ProvisionAttempts != 0 {
 		t.Fatalf("machine intent = %+v", machine.Machine)
@@ -1112,7 +1156,7 @@ func activateProvisioningMachineForToolsTest(
 	t *testing.T,
 	ctx context.Context,
 	fixture machineDispatchFixture,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 	label string,
 ) {
 	t.Helper()
@@ -1214,7 +1258,7 @@ func assertManagedWorkAdmissionToolFailure(
 	t *testing.T,
 	ctx context.Context,
 	fixture machineDispatchFixture,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 	result Result,
 ) {
 	t.Helper()
@@ -1239,7 +1283,7 @@ func assertManagedWorkAdmissionToolFailure(
 	}
 	if toolCall.State != executionstore.ToolCallStateCompleted ||
 		toolCall.Outcome != executionstore.ToolResultOutcomeFailed ||
-		toolCall.RuntimeLockID != storage.NilID ||
+		toolCall.RuntimeLockID != uuid.Nil ||
 		!reflect.DeepEqual(
 			toolResultMapFromTestParts(t, toolCall.ResultContentParts),
 			body,
@@ -1370,7 +1414,7 @@ func TestMissedMachineBackgroundProvisioningCanBeReconciled(t *testing.T) {
 	}
 }
 
-func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
+func TestApprovedMachineDeletionCanBeReconciled(t *testing.T) {
 	ctx := context.Background()
 	fixture := newMachineDispatchFixture(t, ctx, "runtime-interruption")
 	pool := fixture.Pool
@@ -1432,7 +1476,7 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 		toolsTestProjectID,
 		launch.Agent.ID,
 		lock,
-		[]storage.ID{admitted.Inputs[0].ID},
+		[]uuid.UUID{admitted.Inputs[0].ID},
 		config.ID,
 		continuationFrontier,
 		createContext.ID,
@@ -1441,7 +1485,7 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 	call := model.ToolCall{
 		ID:    "call_delete_replay",
 		Name:  "delete_machine",
-		Input: json.RawMessage(`{"machine_ref":"` + created.Machine.Binding.MachineRef + `"}`),
+		Input: json.RawMessage(`{"machine_id":"` + machinePublicIDForTest(t, created.Machine.Binding.MachineID) + `"}`),
 	}
 	providerResponse, err := model.NewResponseEnvelopeForStorage(
 		"tools-test",
@@ -1478,17 +1522,6 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("recorded delete tool calls = %d, want 1", len(records))
 	}
-	if _, err := store.Execution().MarkToolCallReady(
-		ctx,
-		executionstore.MarkToolCallReadyInput{
-			ProjectID:     toolsTestProjectID,
-			AgentID:       launch.Agent.ID,
-			ID:            records[0].ID,
-			RuntimeLockID: lock.ID,
-		},
-	); err != nil {
-		t.Fatalf("mark permission allowed: %v", err)
-	}
 	turn := Turn{
 		ProjectID:          toolsTestProjectID,
 		AgentID:            launch.Agent.ID,
@@ -1497,7 +1530,7 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 		ModelCallContextID: contextRecord.ID,
 		Tools: map[string]ToolSpec{
 			"delete_machine": {
-				Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAllow),
+				Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAsk),
 			},
 		},
 	}
@@ -1505,6 +1538,16 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 		Store: store,
 		Now:   func() time.Time { return now.Add(12 * time.Second) },
 	}
+	if err := executor.PrepareToolCallPermission(ctx, turn, call); err != nil {
+		t.Fatalf("prepare delete permission: %v", err)
+	}
+	interaction, found, err := store.Execution().GetAgentInteractionByToolCallKind(
+		ctx, toolsTestProjectID, launch.Agent.ID, records[0].ID, executionstore.AgentInteractionKindPermission,
+	)
+	if err != nil || !found {
+		t.Fatalf("load delete permission: found=%t err=%v", found, err)
+	}
+	approveToolPermissionForTest(t, ctx, store.Execution(), interaction, userID)
 	dispatchResult, err := executor.Dispatch(ctx, turn, call)
 	if err != nil {
 		t.Fatalf("dispatch delete machine: %v", err)
@@ -1519,7 +1562,7 @@ func TestMissedMachineBackgroundDeletionCanBeReconciled(t *testing.T) {
 		records[0].ID,
 	)
 	if err != nil {
-		t.Fatalf("load deleting machine: %v", err)
+		t.Fatalf("load deleting machine: %v; tool result=%s", err, dispatchResult.ContentParts)
 	}
 	var completedWithoutRuntime bool
 	if err := pool.QueryRow(
@@ -1692,10 +1735,10 @@ func TestReadProcessAfterTerminalWakesAsleepMachine(t *testing.T) {
 		toolsTestProjectID,
 		agent.ID,
 		lock,
-		[]storage.ID{input.ID},
+		[]uuid.UUID{input.ID},
 		snapshot.AgentConfig.ID,
 		admitted.Events[0].Sequence,
-		storage.NilID,
+		uuid.Nil,
 	)
 	contextRecord := runModelCall.Context
 	runCall := model.ToolCall{
@@ -1857,7 +1900,7 @@ func TestReadProcessAfterTerminalWakesAsleepMachine(t *testing.T) {
 		toolsTestProjectID,
 		agent.ID,
 		lock,
-		[]storage.ID{input.ID},
+		[]uuid.UUID{input.ID},
 		snapshot.AgentConfig.ID,
 		readFrontier,
 		contextRecord.ID,
@@ -1917,7 +1960,7 @@ func TestReadProcessAfterTerminalWakesAsleepMachine(t *testing.T) {
 	wakeCalls := 0
 	manager := testPoolMachineManager{wake: func(
 		_ context.Context,
-		orgID, machineID storage.ID,
+		orgID, machineID uuid.UUID,
 	) (bool, error) {
 		if orgID != toolsTestOrgID || machineID != binding.MachineID {
 			return false, storeerr.ErrNotFound
@@ -1981,7 +2024,7 @@ func TestReadProcessAfterTerminalWakesAsleepMachine(t *testing.T) {
 		t.Fatalf("read tool call state=%q, want waiting", toolCall.State)
 	}
 	wakeErr := errors.New("wake failed")
-	manager.wake = func(context.Context, storage.ID, storage.ID) (bool, error) {
+	manager.wake = func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 		return false, wakeErr
 	}
 	cleanupErr := wakeReadProcess(ctx, backgroundToolContext{
@@ -2018,25 +2061,29 @@ func TestReadProcessAfterTerminalWakesAsleepMachine(t *testing.T) {
 	}
 }
 
-type machineDispatchFixture struct {
+type machineDispatchEnvironment struct {
 	Pool        *pgxpool.Pool
 	Store       *storage.Store
-	UserID      storage.ID
+	UserID      uuid.UUID
 	MachinePool executionstore.MachinePoolRecord
 	Config      executionstore.AgentConfigRecord
-	Launch      executionstore.LaunchAgentResult
 	Now         time.Time
 }
 
+type machineDispatchFixture struct {
+	machineDispatchEnvironment
+	Launch executionstore.LaunchAgentResult
+}
+
 type testPoolMachineManager struct {
-	provision func(context.Context, storage.ID, storage.ID) error
+	provision func(context.Context, uuid.UUID, uuid.UUID) error
 	delete    func(context.Context, executionstore.PoolMachineCleanupCandidate) error
-	wake      func(context.Context, storage.ID, storage.ID) (bool, error)
+	wake      func(context.Context, uuid.UUID, uuid.UUID) (bool, error)
 }
 
 func (m testPoolMachineManager) ProvisionMachine(
 	ctx context.Context,
-	orgID, machineID storage.ID,
+	orgID, machineID uuid.UUID,
 ) error {
 	if m.provision == nil {
 		return nil
@@ -2047,8 +2094,8 @@ func (m testPoolMachineManager) ProvisionMachine(
 func (m testPoolMachineManager) StartLaunchProvisioning(
 	context.Context,
 	*slog.Logger,
-	storage.ID,
-	[]storage.ID,
+	uuid.UUID,
+	[]uuid.UUID,
 ) {
 }
 
@@ -2076,7 +2123,7 @@ func (m testPoolMachineManager) DeleteMachines(
 
 func (m testPoolMachineManager) WakeMachine(
 	ctx context.Context,
-	orgID, machineID storage.ID,
+	orgID, machineID uuid.UUID,
 ) (bool, error) {
 	if m.wake == nil {
 		return false, nil
@@ -2108,6 +2155,24 @@ func newMachineDispatchFixtureWithManagement(
 	label string,
 	managementKind management.Kind,
 ) machineDispatchFixture {
+	t.Helper()
+	environment := newMachineDispatchEnvironment(t, ctx, label, managementKind)
+	launch, err := environment.Store.Execution().LaunchAgent(ctx, executionstore.LaunchAgentInput{
+		ProjectID: toolsTestProjectID, AgentConfigID: environment.Config.ID,
+		LaunchedBy: toolsTestUserPrincipal(environment.UserID), IdempotencyKey: "tools-machine-dispatch-launch-" + label,
+	})
+	if err != nil {
+		t.Fatalf("launch machine dispatch agent: %v", err)
+	}
+	return machineDispatchFixture{machineDispatchEnvironment: environment, Launch: launch}
+}
+
+func newMachineDispatchEnvironment(
+	t *testing.T,
+	ctx context.Context,
+	label string,
+	managementKind management.Kind,
+) machineDispatchEnvironment {
 	t.Helper()
 	pool := integrationdb.OpenMigratedPool(t, ctx, "../../../migrations")
 	store := storage.NewStore(
@@ -2187,7 +2252,7 @@ VALUES ($1, $2, 'Tools Test Project', $3, $4, $4)`,
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit managed machine dispatch pool: %v", err)
 		}
-		var machinePoolID storage.ID
+		var machinePoolID uuid.UUID
 		if err := pool.QueryRow(ctx, `
 SELECT id
 FROM machine_pools
@@ -2274,45 +2339,30 @@ tools:
 	compiled := compileToolsAgentYAMLResolved(t, ctx, store, user.ID, sourceYAML)
 	config, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               toolsTestProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
 		t.Fatalf("create machine dispatch config: %v", err)
 	}
-	launch, err := store.Execution().LaunchAgent(
-		ctx,
-		executionstore.LaunchAgentInput{
-			ProjectID:      toolsTestProjectID,
-			AgentConfigID:  config.ID,
-			LaunchedBy:     toolsTestUserPrincipal(user.ID),
-			IdempotencyKey: "tools-machine-dispatch-launch-" + label,
-		},
-	)
-	if err != nil {
-		t.Fatalf("launch machine dispatch agent: %v", err)
-	}
-	return machineDispatchFixture{
+	return machineDispatchEnvironment{
 		Pool:        pool,
 		Store:       store,
 		UserID:      user.ID,
 		MachinePool: machinePool,
 		Config:      config,
-		Launch:      launch,
 		Now:         now,
 	}
 }
 
 type executableBindingFixture struct {
-	GrantID       storage.ID
-	MachineID     storage.ID
-	RuntimeID     storage.ID
-	DaemonTokenID storage.ID
+	GrantID       uuid.UUID
+	MachineID     uuid.UUID
+	RuntimeID     uuid.UUID
+	DaemonTokenID uuid.UUID
 	DisplayName   string
 }
 
@@ -2320,12 +2370,12 @@ func createMachineToolCallForDirectStoreTest(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID, configID storage.ID,
+	agentID, userID, configID uuid.UUID,
 	label, name string,
 	inputJSON json.RawMessage,
 	now time.Time,
 ) (
-	storage.ID,
+	uuid.UUID,
 	executionstore.AgentRuntimeLockRecord,
 	executionstore.AdmittedAgentInputTurn,
 	executionstore.ModelCallContextRecord,
@@ -2350,7 +2400,7 @@ func createMachineToolCallsForDirectStoreTest(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID, configID storage.ID,
+	agentID, userID, configID uuid.UUID,
 	label string,
 	calls []model.ToolCall,
 	now time.Time,
@@ -2394,12 +2444,12 @@ func recordMachineToolCallForDirectStoreTest(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID, configID storage.ID,
+	agentID, userID, configID uuid.UUID,
 	label, name string,
 	inputJSON json.RawMessage,
 	now time.Time,
 ) (
-	storage.ID,
+	uuid.UUID,
 	executionstore.AgentRuntimeLockRecord,
 	executionstore.AdmittedAgentInputTurn,
 	executionstore.ModelCallContextRecord,
@@ -2424,7 +2474,7 @@ func recordMachineToolCallsForDirectStoreTest(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentID, userID, configID storage.ID,
+	agentID, userID, configID uuid.UUID,
 	label string,
 	calls []model.ToolCall,
 	now time.Time,
@@ -2471,10 +2521,10 @@ func recordMachineToolCallsForDirectStoreTest(
 		toolsTestProjectID,
 		agentID,
 		lock,
-		[]storage.ID{input.ID},
+		[]uuid.UUID{input.ID},
 		configID,
 		admitted.Events[0].Sequence,
-		storage.NilID,
+		uuid.Nil,
 	)
 	contextRecord := modelCall.Context
 	providerResponse, err := model.NewResponseEnvelopeForStorage(
@@ -2526,7 +2576,7 @@ func createToolsRuntimeAgentWithMachineSources(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	name string,
 	machineSources []toolsAgentMachineSource,
 ) executionstore.LaunchAgentResult {
@@ -2546,7 +2596,7 @@ func createToolsRuntimeAgentWithMachineSourcesAndSkills(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	name string,
 	machineSources []toolsAgentMachineSource,
 	skillIDs []string,
@@ -2581,12 +2631,10 @@ model:
 	compiled := compileToolsAgentYAMLResolved(t, ctx, store, userID, sourceYAML)
 	config, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               toolsTestProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -2618,7 +2666,7 @@ func ensureToolsProjectOperator(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	now time.Time,
 ) {
 	t.Helper()
@@ -2645,7 +2693,7 @@ func createExecutableBinding(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	name string,
 	now time.Time,
 ) executableBindingFixture {
@@ -2706,4 +2754,10 @@ func createExecutableBinding(
 		DaemonTokenID: token.Record.ID,
 		DisplayName:   machine.DisplayName,
 	}
+}
+
+func (toolsTestMachinePoolProviders) ConfigurableMachineResources(
+	string,
+) (executionstore.ConfigurableMachineResources, error) {
+	return executionstore.ConfigurableMachineResources{CPU: true, MemoryMB: true}, nil
 }

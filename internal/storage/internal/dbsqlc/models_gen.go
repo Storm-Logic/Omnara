@@ -28,12 +28,10 @@ type AgentConfig struct {
 	OrgID                   uuid.UUID
 	ProjectID               uuid.UUID
 	ConfiguredModelID       uuid.UUID
-	Definition              json.RawMessage
-	Source                  string
-	SourceFormat            string
-	SourceHash              string
+	Source                  *string
+	SourceFormat            *string
+	SourceHash              *string
 	CompiledDefinition      json.RawMessage
-	CompilerVersion         string
 	EffectiveDefinitionHash string
 	CreatedAt               time.Time
 }
@@ -91,27 +89,6 @@ type AgentInteractionReadProjection struct {
 	ResolvedAt         *time.Time
 }
 
-type AgentMachineBinding struct {
-	ID                     uuid.UUID
-	OrgID                  uuid.UUID
-	ProjectID              uuid.UUID
-	AgentID                uuid.UUID
-	CreateToolCallID       *uuid.UUID
-	DeleteToolCallID       *uuid.UUID
-	MachineID              uuid.UUID
-	MachineRef             string
-	BindingKind            string
-	State                  string
-	Description            string
-	Cwd                    string
-	EnvOverlay             json.RawMessage
-	SecretEnvOverlay       json.RawMessage
-	Metadata               json.RawMessage
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
-	DeleteAfterIdleMinutes *int32
-}
-
 type AgentMcpConnection struct {
 	ID                 uuid.UUID
 	AgentID            uuid.UUID
@@ -124,7 +101,7 @@ type AgentMcpConnection struct {
 	ServerCapabilities json.RawMessage
 	ServerInfo         json.RawMessage
 	ToolsSnapshot      json.RawMessage
-	InitializeError    string
+	InitializeError    *string
 	Generation         int64
 	RequestSequence    int64
 	CreatedAt          time.Time
@@ -372,6 +349,8 @@ type ModelProviderConfig struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	IdleTimeoutMs      int32
+	Headers            json.RawMessage
+	SecretHeaders      json.RawMessage
 }
 
 type OrgApiKey struct {

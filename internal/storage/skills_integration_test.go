@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/blobstore"
@@ -126,7 +127,7 @@ func TestSkillsStorageFlatOwnershipVisibilityAndPagination(t *testing.T) {
 	if len(resolved) != 0 || len(missing) != 1 || missing[0] != orgSkillPublicID {
 		t.Fatalf("ungranted organization skill resolved=%+v missing=%+v", resolved, missing)
 	}
-	if _, err := store.Skills().GetSkillForDispatch(ctx, testProjectID, orgSkillPublicID); !storeerr.IsNotFound(err) {
+	if _, err := store.Skills().GetSkillForDispatch(ctx, testProjectID, orgSkill.ID); !storeerr.IsNotFound(err) {
 		t.Fatalf("dispatch ungranted organization skill error = %v, want not found", err)
 	}
 	if _, err := store.Skills().CreateSkillGrant(ctx, skillstore.CreateSkillGrantInput{
@@ -182,7 +183,7 @@ func TestSkillsStorageFlatOwnershipVisibilityAndPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list project available skills: %v", err)
 	}
-	wantAvailability := map[ID]string{
+	wantAvailability := map[uuid.UUID]string{
 		orgSkill.ID: skillstore.SkillAvailabilityGrant, projectSkill.ID: skillstore.SkillAvailabilityDirect,
 		userSkill.ID: skillstore.SkillAvailabilityGrant,
 	}
@@ -204,12 +205,12 @@ func TestSkillsStorageFlatOwnershipVisibilityAndPagination(t *testing.T) {
 		}
 	}
 	if dispatched, err := store.Skills().GetSkillForDispatch(
-		ctx, testProjectID, orgSkillPublicID,
+		ctx, testProjectID, orgSkill.ID,
 	); err != nil || dispatched.ID != orgSkill.ID {
 		t.Fatalf("dispatch granted organization skill = %+v, err=%v", dispatched, err)
 	}
 	if dispatched, err := store.Skills().GetSkillForDispatch(
-		ctx, testProjectID, userSkillPublicID,
+		ctx, testProjectID, userSkill.ID,
 	); err != nil || dispatched.ID != userSkill.ID {
 		t.Fatalf("dispatch granted user skill = %+v, err=%v", dispatched, err)
 	}
@@ -226,7 +227,7 @@ func TestSkillsStorageFlatOwnershipVisibilityAndPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list developer skills: %v", err)
 	}
-	for _, id := range []ID{orgSkill.ID, projectSkill.ID, userSkill.ID} {
+	for _, id := range []uuid.UUID{orgSkill.ID, projectSkill.ID, userSkill.ID} {
 		if !containsSkill(visible.Skills, id) {
 			t.Fatalf("developer list missing skill %s: %+v", id, visible.Skills)
 		}
@@ -296,7 +297,7 @@ func TestSkillsStorageFlatOwnershipVisibilityAndPagination(t *testing.T) {
 	if err != nil || len(resolved) != 0 || len(missing) != 1 {
 		t.Fatalf("revoked user skill resolved=%+v missing=%+v err=%v", resolved, missing, err)
 	}
-	if _, err := store.Skills().GetSkillForDispatch(ctx, testProjectID, userSkillPublicID); !storeerr.IsNotFound(err) {
+	if _, err := store.Skills().GetSkillForDispatch(ctx, testProjectID, userSkill.ID); !storeerr.IsNotFound(err) {
 		t.Fatalf("dispatch revoked user skill error = %v, want not found", err)
 	}
 }
@@ -334,7 +335,7 @@ skills:
 			return resolvedTestModelSelection(configuredModel), nil
 		},
 		ResolveSkillID: func(id string) (agentconfig.SkillResolution, error) {
-			return agentconfig.SkillResolution{PublicID: id, Name: skill.Name}, nil
+			return agentconfig.SkillResolution{ID: uuid.Must(publicid.Decode(publicid.KindSkill, id)), Name: skill.Name}, nil
 		},
 	})
 	if err != nil {
@@ -342,12 +343,10 @@ skills:
 	}
 	config, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       configuredModel.ID,
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -576,7 +575,7 @@ func TestOrganizationDeletionSoftDeletesSkillRevisionSet(t *testing.T) {
 	assertSkillRevisionSetDeleted(t, ctx, pool, skill.ID)
 }
 
-func assertSkillRevisionSetDeleted(t *testing.T, ctx context.Context, pool *pgxpool.Pool, skillID ID) {
+func assertSkillRevisionSetDeleted(t *testing.T, ctx context.Context, pool *pgxpool.Pool, skillID uuid.UUID) {
 	t.Helper()
 	var identityDeleted bool
 	var liveRevisions int
@@ -832,7 +831,7 @@ func createIntegrationSkill(
 	return record
 }
 
-func containsSkill(records []skillstore.SkillRecord, id ID) bool {
+func containsSkill(records []skillstore.SkillRecord, id uuid.UUID) bool {
 	for _, record := range records {
 		if record.ID == id {
 			return true
@@ -841,6 +840,6 @@ func containsSkill(records []skillstore.SkillRecord, id ID) bool {
 	return false
 }
 
-func publicSkillID(id ID) (string, error) {
+func publicSkillID(id uuid.UUID) (string, error) {
 	return publicid.Encode(publicid.KindSkill, id)
 }

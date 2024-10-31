@@ -12,11 +12,12 @@ import (
 	"os"
 	"path"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/processcmd"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
 	"github.com/omnara-ai/omnara/internal/storage/internal/secretops"
@@ -62,12 +63,12 @@ type MachineProvisioningOverlay struct {
 
 type MachineEnvironment struct {
 	Env       map[string]string
-	SecretEnv map[string]string
+	SecretEnv map[string]uuid.UUID
 }
 
 type MachineEnvironmentOverlay struct {
 	Env       map[string]*string
-	SecretEnv map[string]*string
+	SecretEnv map[string]*uuid.UUID
 }
 
 type MachineBindingConfig struct {
@@ -88,7 +89,13 @@ type machinePoolDefaults struct {
 	Environment  MachineEnvironment
 }
 
+type ConfigurableMachineResources struct {
+	CPU      bool
+	MemoryMB bool
+}
+
 type MachinePoolProviders interface {
+	ConfigurableMachineResources(provider string) (ConfigurableMachineResources, error)
 	ValidatePool(
 		provider string,
 		policy MachinePoolProviderPolicy,
@@ -112,18 +119,12 @@ func (s *Store) ResolveMachineProvisioning(
 	projectOverlay, agentOverlay MachineProvisioningOverlay,
 ) (MachineProvisioningConfig, error) {
 	machineProvisioning := policy.DefaultProvisioning
-	if projectOverlay.CPU != nil {
-		machineProvisioning.CPU = projectOverlay.CPU
-	}
-	if projectOverlay.MemoryMB != nil {
-		machineProvisioning.MemoryMB = projectOverlay.MemoryMB
-	}
-	if agentOverlay.CPU != nil {
-		machineProvisioning.CPU = agentOverlay.CPU
-	}
-	if agentOverlay.MemoryMB != nil {
-		machineProvisioning.MemoryMB = agentOverlay.MemoryMB
-	}
+	machineProvisioning.CPU = effectiveMachineResourceDefault(
+		machineProvisioning.CPU, projectOverlay.CPU, agentOverlay.CPU,
+	)
+	machineProvisioning.MemoryMB = effectiveMachineResourceDefault(
+		machineProvisioning.MemoryMB, projectOverlay.MemoryMB, agentOverlay.MemoryMB,
+	)
 	providerOptions, err := s.machinePoolProviders.ResolveMachineProviderOptions(
 		provider,
 		policy.DefaultProvisioning.ProviderOptions,
@@ -188,9 +189,7 @@ func (s *Store) resolvePoolMachineProvisioningConfig(
 	)
 }
 
-func (s *Store) ResolvePoolMachineTx(
-	ctx context.Context,
-	qtx *dbsqlc.Queries,
+func (s *Store) ResolvePoolMachine(
 	poolGrant dbsqlc.GetActiveProjectMachinePoolGrantForLaunchRow,
 	agentMachine agentconfig.RuntimeMachine,
 ) (ResolvedPoolMachine, error) {
@@ -212,11 +211,7 @@ func (s *Store) ResolvePoolMachineTx(
 	if err != nil {
 		return ResolvedPoolMachine{}, fmt.Errorf("project machine pool grant default_machine fields: %w", err)
 	}
-	machineEnv, err := resolveMachineEnvironmentTx(
-		ctx,
-		qtx,
-		poolGrant.OrgID,
-		poolGrant.ProjectID,
+	machineEnv, err := resolveMachineEnvironment(
 		poolDefaultEnvironment,
 		projectEnvironmentOverlay,
 	)
@@ -224,11 +219,7 @@ func (s *Store) ResolvePoolMachineTx(
 		return ResolvedPoolMachine{}, err
 	}
 	bindingEnvironmentOverlay := runtimeMachineEnvironmentOverlay(agentMachine)
-	if _, err := resolveMachineEnvironmentTx(
-		ctx,
-		qtx,
-		poolGrant.OrgID,
-		poolGrant.ProjectID,
+	if _, err := resolveMachineEnvironment(
 		machineEnv,
 		bindingEnvironmentOverlay,
 	); err != nil {
@@ -248,9 +239,9 @@ func (s *Store) ResolvePoolMachineTx(
 
 func (s *Store) ResolveMachineProviderAuthToken(
 	ctx context.Context,
-	orgID ID,
+	orgID uuid.UUID,
 	managementKind management.Kind,
-	providerAuthSecretID ID,
+	providerAuthSecretID uuid.UUID,
 	providerAuthEnvVar string,
 ) (string, error) {
 	credential, err := s.ResolveMachineProviderCredential(
@@ -265,19 +256,19 @@ func (s *Store) ResolveMachineProviderAuthToken(
 
 type MachineProviderCredential struct {
 	Token     string
-	VersionID ID
+	VersionID uuid.UUID
 }
 
 func (s *Store) ResolveMachineProviderCredential(
 	ctx context.Context,
-	orgID ID,
+	orgID uuid.UUID,
 	managementKind management.Kind,
-	providerAuthSecretID ID,
+	providerAuthSecretID uuid.UUID,
 	providerAuthEnvVar string,
 ) (MachineProviderCredential, error) {
 	switch managementKind {
 	case management.Tenant:
-		if isNilID(providerAuthSecretID) {
+		if providerAuthSecretID == uuid.Nil {
 			return MachineProviderCredential{}, errors.New("provider_auth_secret_id is required")
 		}
 		credential, err := s.secrets.ReadOrgOwnedSecretPayload(ctx, secretstore.ReadOrgOwnedSecretPayloadInput{
@@ -317,7 +308,7 @@ func (s *Store) validatePoolDefaultsTx(
 	input CreateMachinePoolInput,
 	defaults machinePoolDefaults,
 ) error {
-	if _, err := resolveMachineEnvironmentTx(ctx, qtx, input.OrgID, NilID, defaults.Environment); err != nil {
+	if _, err := resolveMachineEnvironmentTx(ctx, qtx, input.OrgID, uuid.Nil, defaults.Environment); err != nil {
 		return fmt.Errorf("machine pool default_machine fields %w", err)
 	}
 	return storeerr.InvalidRequest(s.machinePoolProviders.ValidatePool(
@@ -352,10 +343,10 @@ func resolveMachineEnvironment(
 			return MachineEnvironment{}, err
 		}
 		if overlay.Env != nil {
-			resolved.Env = applyStringMapOverlay(resolved.Env, overlay.Env)
+			resolved.Env = applyMapOverlay(resolved.Env, overlay.Env)
 		}
 		if overlay.SecretEnv != nil {
-			resolved.SecretEnv = applyStringMapOverlay(resolved.SecretEnv, overlay.SecretEnv)
+			resolved.SecretEnv = applyMapOverlay(resolved.SecretEnv, overlay.SecretEnv)
 		}
 	}
 	if err := validateMachineEnvironment(resolved); err != nil {
@@ -367,7 +358,7 @@ func resolveMachineEnvironment(
 func resolveMachineEnvironmentTx(
 	ctx context.Context,
 	qtx *dbsqlc.Queries,
-	orgID, projectID ID,
+	orgID, projectID uuid.UUID,
 	base MachineEnvironment,
 	overlays ...MachineEnvironmentOverlay,
 ) (MachineEnvironment, error) {
@@ -381,9 +372,9 @@ func resolveMachineEnvironmentTx(
 	return environment, nil
 }
 
-func applyStringMapOverlay(base map[string]string, overlay map[string]*string) map[string]string {
+func applyMapOverlay[T any](base map[string]T, overlay map[string]*T) map[string]T {
 	if base == nil {
-		base = map[string]string{}
+		base = map[string]T{}
 	}
 	for key, value := range overlay {
 		name := strings.ToUpper(key)
@@ -433,11 +424,8 @@ func validateMachineEnvironment(environment MachineEnvironment) error {
 		if _, ok := envNames[strings.ToUpper(key)]; ok {
 			return fmt.Errorf("env and secret_env cannot both set key %s", key)
 		}
-		if secretID == "" {
+		if secretID == uuid.Nil {
 			return fmt.Errorf("secret_env.%s is required", key)
-		}
-		if _, err := publicid.Decode(publicid.KindSecret, secretID); err != nil {
-			return fmt.Errorf("secret_env.%s: %w", key, err)
 		}
 	}
 	return nil
@@ -535,7 +523,7 @@ func machineEnvironmentToColumns(environment MachineEnvironment) (json.RawMessag
 		return nil, nil, err
 	}
 	if environment.SecretEnv == nil {
-		environment.SecretEnv = map[string]string{}
+		environment.SecretEnv = map[string]uuid.UUID{}
 	}
 	secretEnv, err := marshalJSON(environment.SecretEnv)
 	if err != nil {
@@ -558,7 +546,7 @@ func MachineEnvironmentOverlayToColumns(
 		return nil, nil, err
 	}
 	if overlay.SecretEnv == nil {
-		overlay.SecretEnv = map[string]*string{}
+		overlay.SecretEnv = map[string]*uuid.UUID{}
 	}
 	secretEnvOverlay, err := marshalJSON(overlay.SecretEnv)
 	if err != nil {
@@ -690,20 +678,16 @@ func hasMachineProvisioningOverlay(machine agentconfig.RuntimeMachine) bool {
 func validateMachineEnvironmentSecretsTx(
 	ctx context.Context,
 	qtx *dbsqlc.Queries,
-	orgID, projectID ID,
+	orgID, projectID uuid.UUID,
 	environment MachineEnvironment,
 ) error {
-	validatedSecretIDs := make(map[ID]struct{}, len(environment.SecretEnv))
-	for envName, secretRef := range environment.SecretEnv {
-		secretID, err := publicid.Decode(publicid.KindSecret, secretRef)
-		if err != nil {
-			return fmt.Errorf("secret_env.%s: %w", envName, err)
-		}
+	validatedSecretIDs := make(map[uuid.UUID]struct{}, len(environment.SecretEnv))
+	for envName, secretID := range environment.SecretEnv {
 		if _, ok := validatedSecretIDs[secretID]; ok {
 			continue
 		}
 		var secret secretops.Facts
-		if isNilID(projectID) {
+		if projectID == uuid.Nil {
 			record, err := qtx.GetSecret(ctx, dbsqlc.GetSecretParams{OrgID: orgID, ID: secretID})
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -763,7 +747,7 @@ func environmentByteSize(env map[string]string) int {
 
 func (s *Store) ResolveEnvironmentSecrets(
 	ctx context.Context,
-	orgID, projectID ID,
+	orgID, projectID uuid.UUID,
 	envJSON, secretEnvJSON json.RawMessage,
 ) (map[string]string, error) {
 	environment, err := MachineEnvironmentFromColumns(envJSON, secretEnvJSON)
@@ -775,7 +759,7 @@ func (s *Store) ResolveEnvironmentSecrets(
 
 func (s *Store) resolveEnvironmentSecrets(
 	ctx context.Context,
-	orgID, projectID ID,
+	orgID, projectID uuid.UUID,
 	environment MachineEnvironment,
 ) (map[string]string, error) {
 	env := maps.Clone(environment.Env)
@@ -787,17 +771,16 @@ func (s *Store) resolveEnvironmentSecrets(
 	if resolvedBytes > MaxResolvedEnvironmentBytes {
 		return nil, fmt.Errorf("%w: resolved environment exceeds size limit", storeerr.ErrPermanentEnvironment)
 	}
-	resolvedSecrets := make(map[ID]string, len(secretEnv))
-	for envName, secretRef := range secretEnv {
-		secretID, err := publicid.Decode(publicid.KindSecret, secretRef)
-		if err != nil {
-			return nil, fmt.Errorf("%w: secret_env.%s: %w", storeerr.ErrPermanentEnvironment, envName, err)
-		}
+	resolvedSecrets := make(map[uuid.UUID]string, len(secretEnv))
+	for envName, secretID := range secretEnv {
 		value, ok := resolvedSecrets[secretID]
 		if !ok {
 			payload, err := s.readEnvironmentSecretPayload(ctx, orgID, projectID, secretID)
 			if err != nil {
-				if errors.Is(err, storeerr.ErrNotFound) || errors.Is(err, storeerr.ErrInvalidSecretRequest) {
+				if errors.Is(err, storeerr.ErrNotFound) {
+					continue
+				}
+				if errors.Is(err, storeerr.ErrInvalidSecretRequest) {
 					return nil, fmt.Errorf("%w: secret_env.%s: %w", storeerr.ErrPermanentEnvironment, envName, err)
 				}
 				return nil, fmt.Errorf("secret_env.%s: %w", envName, err)
@@ -823,9 +806,9 @@ func (s *Store) resolveEnvironmentSecrets(
 
 func (s *Store) readEnvironmentSecretPayload(
 	ctx context.Context,
-	orgID, projectID, secretID ID,
+	orgID, projectID, secretID uuid.UUID,
 ) (secretstore.SecretPayloadRecord, error) {
-	if isNilID(projectID) {
+	if projectID == uuid.Nil {
 		return s.secrets.ReadOrgOwnedSecretPayload(ctx, secretstore.ReadOrgOwnedSecretPayloadInput{
 			OrgID:          orgID,
 			SecretID:       secretID,
@@ -890,6 +873,13 @@ func decodeStrictObject(raw json.RawMessage, dest any) error {
 	return nil
 }
 
+func validateMachineCwdLength(field, cwd string) error {
+	if utf8.RuneCountInString(cwd) > agentconfig.MaxMachineCwdLength {
+		return fmt.Errorf("%s cannot exceed %d characters", field, agentconfig.MaxMachineCwdLength)
+	}
+	return nil
+}
+
 func resolveMachineCwd(poolCwd, grantCwd string) string {
 	if grantCwd != "" {
 		return grantCwd
@@ -915,4 +905,14 @@ func resolveProcessCwd(machineCwd, bindingCwd, requestedCwd string) string {
 		return strings.TrimSuffix(base, "/") + "/" + requestedCwd
 	}
 	return path.Join(base, requestedCwd)
+}
+
+func effectiveMachineResourceDefault(pool, project, agent *int) *int {
+	if agent != nil {
+		return agent
+	}
+	if project != nil {
+		return project
+	}
+	return pool
 }

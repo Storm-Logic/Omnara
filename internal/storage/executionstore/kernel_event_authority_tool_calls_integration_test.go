@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/omnara-ai/omnara/internal/events"
 	"github.com/omnara-ai/omnara/internal/modelenvelope"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
+	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 	"github.com/omnara-ai/omnara/internal/toolcatalog"
@@ -178,13 +180,14 @@ func TestToolCallLifecyclePublishesCommittedUpdatesOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture, _, claim := newStartedNormalModelCallTestFixture(t, ctx, "tool_call_updates")
+	enableEventWebhook(t, fixture, nil)
 	publisher := &recordingPostCommitPublisher{}
 	fixture.Store = newIntegrationStore(
 		fixture.Store.pool,
-		WithPostCommitPublisher(publisher),
+		storage.WithPostCommitPublisher(publisher),
 	)
 
-	_, toolCalls := recordToolCallBatchForContextTest(
+	sourceEvent, toolCalls := recordToolCallBatchForContextTest(
 		t,
 		ctx,
 		fixture,
@@ -236,9 +239,35 @@ func TestToolCallLifecyclePublishesCommittedUpdatesOnce(t *testing.T) {
 		string(executionstore.ToolCallStateReady),
 		string(executionstore.ToolCallStateCompleted),
 	}
+	assertWebhookToolStates(t, fixture, toolCall.ID, want)
 	if got := publisher.toolCallStates(toolCall.ID); !slices.Equal(got, want) {
 		t.Fatalf("tool call update states = %v, want %v", got, want)
 	}
+	var sequences []int64
+	require.NoError(t, fixture.Store.pool.QueryRow(ctx, `
+		SELECT array_agg(event_sequence ORDER BY event_sequence)
+		FROM event_webhook_deliveries
+		WHERE agent_id = $1 AND event_sequence >= $2`,
+		fixture.AgentID, sourceEvent.Sequence).Scan(&sequences))
+	require.Equal(t, []int64{sourceEvent.Sequence, sourceEvent.Sequence + 1}, sequences)
+
+	webhookEvent, err := fixture.Store.Execution().GetAgentEventForWebhook(
+		ctx, testProjectID, fixture.AgentID, sourceEvent.Sequence,
+	)
+	require.NoError(t, err)
+	timeline, err := fixture.Store.Execution().ListAgentEventsForRead(
+		ctx, testProjectID, fixture.AgentID, sourceEvent.Sequence-1, 1,
+	)
+	require.NoError(t, err)
+	require.Len(t, timeline, 1)
+	require.Equal(t, timeline[0], webhookEvent)
+	_, err = fixture.Store.Execution().GetAgentEventForWebhook(ctx, uuid.New(), fixture.AgentID, sourceEvent.Sequence)
+	require.ErrorIs(t, err, storeerr.ErrNotFound)
+	_, err = fixture.Store.Execution().GetAgentEventForWebhook(ctx, testProjectID, uuid.New(), sourceEvent.Sequence)
+	require.ErrorIs(t, err, storeerr.ErrNotFound)
+	_, err = fixture.Store.Execution().GetAgentEventForWebhook(ctx, testProjectID, fixture.AgentID, sourceEvent.Sequence+2)
+	require.ErrorIs(t, err, storeerr.ErrNotFound)
+
 }
 
 func TestToolCallBindingBatchRejectsEnvelopeMismatchWithoutPartialState(t *testing.T) {
@@ -587,7 +616,7 @@ func TestKernelToolCallBlockLinkageConstraints(t *testing.T) {
 		t,
 		ctx,
 		fixture,
-		[]ID{openingInputID},
+		[]uuid.UUID{openingInputID},
 		agent.CurrentConfigID,
 		resultWatermark,
 		now.Add(time.Second),
@@ -625,7 +654,7 @@ func TestKernelToolCallBlockLinkageConstraints(t *testing.T) {
 	); !isPgConstraintViolation(err) {
 		t.Fatalf("mismatched tool call block model output error = %v, want constraint violation", err)
 	}
-	var blockID, linkedToolCallID ID
+	var blockID, linkedToolCallID uuid.UUID
 	if err := fixture.Store.pool.QueryRow(ctx, `
 SELECT block.id, block.tool_call_id
 FROM content_blocks AS block
@@ -764,7 +793,7 @@ func TestKernelAppendCompletedToolResultWritesTypedAuthority(t *testing.T) {
 	if len(appended) != 1 || appended[0].Kind != events.KindToolResult {
 		t.Fatalf("events = %+v, want one tool_result from completion transaction", appended)
 	}
-	var resultID ID
+	var resultID uuid.UUID
 	if err := fixture.Store.pool.QueryRow(
 		ctx,
 		`SELECT event.tool_call_result_id FROM agent_events event JOIN agents agent ON agent.id = event.agent_id WHERE agent.project_id = $1 AND event.agent_id = $2 AND event.id = $3`,
@@ -774,7 +803,7 @@ func TestKernelAppendCompletedToolResultWritesTypedAuthority(t *testing.T) {
 	).Scan(&resultID); err != nil {
 		t.Fatalf("load typed event result pointer: %v", err)
 	}
-	if isNilID(resultID) {
+	if resultID == uuid.Nil {
 		t.Fatalf("tool_result event has nil tool_call_result_id")
 	}
 	result, found, err := fixture.Store.Execution().GetToolCallResultAuthorityByToolCall(
@@ -970,6 +999,9 @@ func TestKernelInvalidToolResultRollsBackCompletion(t *testing.T) {
 		"read_process",
 	)
 
+	publisher := &recordingPostCommitPublisher{}
+	fixture.Store = newIntegrationStore(fixture.Store.pool, storage.WithPostCommitPublisher(publisher))
+
 	_, err := fixture.Store.Execution().CompleteToolCall(ctx, executionstore.CompleteToolCallInput{
 		ProjectID:     testProjectID,
 		AgentID:       fixture.AgentID,
@@ -980,6 +1012,7 @@ func TestKernelInvalidToolResultRollsBackCompletion(t *testing.T) {
 			`[{"type":"structured_data","value":{"ok":true},"transport_metadata":"discarded"}]`,
 		),
 	})
+	require.Empty(t, publisher.intents)
 	if !errors.Is(err, storeerr.ErrInvalidRequest) {
 		t.Fatalf("complete tool call error = %v, want invalid request", err)
 	}

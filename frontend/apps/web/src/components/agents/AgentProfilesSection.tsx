@@ -1,5 +1,5 @@
 import { type AgentProfileListSort, useAgentProfiles, useCreateAgent } from '@omnara/react'
-import { type AgentProfile, ApiError } from '@omnara/sdk'
+import { type AgentProfileSummary, ApiError } from '@omnara/sdk'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 
@@ -8,6 +8,7 @@ import { SlackOAuthOutcomeDialog } from '@/components/agents/SlackOAuthOutcomeDi
 import { DataTable } from '@/components/data-table/DataTable'
 import { ResourceListToolbar } from '@/components/data-table/ResourceListToolbar'
 import { TriangleAlert } from '@/components/icons'
+import { SearchHeader } from '@/components/layout/SearchHeader'
 import { Button } from '@/components/ui/button'
 import { usePagedQuery } from '@/hooks/use-paged-query'
 import {
@@ -15,6 +16,7 @@ import {
   useListToolbarVisibility,
   useResourceList,
 } from '@/hooks/use-resource-list'
+import { guides } from '@/lib/docs'
 import { isInsufficientCreditsError } from '@/lib/insufficient-credits'
 import { useWebConfig } from '@/lib/web-config'
 
@@ -42,7 +44,7 @@ export function AgentProfilesSection({
   const [launchingId, setLaunchingId] = useState<string | null>(null)
   const [launchError, setLaunchError] = useState<ApiError>()
 
-  async function launch(profile: AgentProfile) {
+  async function launch(profile: AgentProfileSummary) {
     setLaunchError(undefined)
     setLaunchingId(profile.id)
     try {
@@ -80,8 +82,19 @@ export function AgentProfilesSection({
             )}
           </div>
         )}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="type-title">Agent profiles</h2>
+        <SearchHeader
+          title="Agent profiles"
+          guide={guides.agentProfiles}
+          toolbar={
+            <ResourceListToolbar
+              search={list.search}
+              onSearchChange={list.setSearch}
+              placeholder="Search profiles by name…"
+              showSearch={showToolbar}
+              sort={{ value: list.sort, options: resourceSortOptions, onChange: list.setSort }}
+            />
+          }
+        >
           {canManage && (
             <Button asChild size="sm">
               <Link to="/projects/$projectId/agents/new" params={{ projectId }}>
@@ -89,17 +102,7 @@ export function AgentProfilesSection({
               </Link>
             </Button>
           )}
-        </div>
-        {showToolbar && (
-          <ResourceListToolbar
-            search={list.search}
-            onSearchChange={list.setSearch}
-            sort={list.sort}
-            sortOptions={resourceSortOptions}
-            onSortChange={list.setSort}
-            placeholder="Search profiles by name…"
-          />
-        )}
+        </SearchHeader>
         <DataTable
           columns={[
             {

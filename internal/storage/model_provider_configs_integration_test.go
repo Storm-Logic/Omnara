@@ -727,12 +727,10 @@ model:
 	}
 	referencedAgentConfig, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(referencedCompiled.CanonicalJSON),
 		Source:                  referencedSource,
 		SourceFormat:            string(agentconfig.SourceFormatYAML),
 		ConfiguredModelID:       referencedModel.ID,
 		CompiledDefinition:      json.RawMessage(referencedCompiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: referencedCompiled.Hash,
 	})
 	if err != nil {
@@ -1155,12 +1153,10 @@ DROP FUNCTION IF EXISTS test_pause_agent_config_insert();
 	go func() {
 		_, createErr := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 			ProjectID:               testProjectID,
-			Definition:              json.RawMessage(compiled.CanonicalJSON),
 			Source:                  source,
 			SourceFormat:            string(agentconfig.SourceFormatYAML),
 			ConfiguredModelID:       configuredModel.ID,
 			CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: compiled.Hash,
 		})
 		createDone <- createErr
@@ -1301,12 +1297,10 @@ tools:
 
 	_, err = store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  source,
 		SourceFormat:            string(agentconfig.SourceFormatYAML),
 		ConfiguredModelID:       configuredModel.ID,
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if !errors.Is(err, storeerr.ErrInvalidModelProviderConfig) {
@@ -1803,12 +1797,10 @@ model:
 
 	agentConfig, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               testProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  source,
 		SourceFormat:            string(agentconfig.SourceFormatYAML),
 		ConfiguredModelID:       configuredModel.ID,
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -1878,7 +1870,7 @@ func TestListProjectModelGrantsSearchSortAndEmbeddedModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create alpha model: %v", err)
 	}
-	for i, modelID := range []ID{betaModel.ID, alphaModel.ID} {
+	for i, modelID := range []uuid.UUID{betaModel.ID, alphaModel.ID} {
 		if _, err := store.Models().CreateProjectModelGrant(ctx, modelstore.CreateProjectModelGrantInput{
 			OrgID:             testOrgID,
 			ProjectID:         testProjectID,

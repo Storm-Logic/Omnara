@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/harness/tools"
 	"github.com/omnara-ai/omnara/internal/integration/slack"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/modelprovider"
 	"github.com/omnara-ai/omnara/internal/secrets"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
 	"github.com/omnara-ai/omnara/internal/storage/modelstore"
@@ -87,7 +87,6 @@ model:
 	}
 	contract, err := agentconfig.RuntimeContractFromCompiled(
 		snapshot.AgentConfig.CompiledDefinition,
-		snapshot.AgentConfig.CompilerVersion,
 		snapshot.AgentConfig.EffectiveDefinitionHash,
 	)
 	if err != nil {
@@ -380,7 +379,7 @@ func attachKernelSlackTarget(
 	t *testing.T,
 	ctx context.Context,
 	fixture kernelFixture,
-	agentID, agentProfileID storage.ID,
+	agentID, agentProfileID uuid.UUID,
 	identifier, providerRef string,
 ) string {
 	t.Helper()
@@ -564,7 +563,7 @@ func TestAgentExecutorAllowsPreparedAttemptAcrossGrantReplacement(t *testing.T) 
 	if replacementErr != nil {
 		t.Fatalf("replace model grant after request preparation: %v", replacementErr)
 	}
-	if replacementGrant.ID == storage.NilID || replacementGrant.ID == originalGrantID {
+	if replacementGrant.ID == uuid.Nil || replacementGrant.ID == originalGrantID {
 		t.Fatalf("replacement grant = %+v, original=%s", replacementGrant, originalGrantID)
 	}
 	if modelClient.preparedCount() != 1 || modelClient.respondedCount() != 1 {
@@ -657,7 +656,7 @@ func TestAgentExecutorAllowsPreparedAttemptAcrossCredentialRotation(t *testing.T
 	if rotationErr != nil {
 		t.Fatalf("rotate credential after request preparation: %v", rotationErr)
 	}
-	if rotatedVersion.ID == storage.NilID || rotatedVersion.ID == credential.CurrentVersionID {
+	if rotatedVersion.ID == uuid.Nil || rotatedVersion.ID == credential.CurrentVersionID {
 		t.Fatalf("credential version was not rotated: initial=%s rotated=%s", credential.CurrentVersionID, rotatedVersion.ID)
 	}
 	if modelClient.preparedCount() != 1 || modelClient.respondedCount() != 1 {

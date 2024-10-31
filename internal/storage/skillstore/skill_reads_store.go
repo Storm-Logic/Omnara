@@ -12,6 +12,7 @@ import (
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
 	"github.com/omnara-ai/omnara/internal/storage/internal/skillops"
+	"github.com/omnara-ai/omnara/internal/storage/internal/storeutil"
 	"github.com/omnara-ai/omnara/internal/storage/listing"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
 )
@@ -68,14 +69,13 @@ func (s *Store) GetVisibleSkill(
 func (s *Store) GetSkillForDispatch(
 	ctx context.Context,
 	projectID uuid.UUID,
-	publicSkillID string,
+	id uuid.UUID,
 ) (SkillRecord, error) {
-	if isNilUUID(projectID) {
+	if projectID == uuid.Nil {
 		return SkillRecord{}, errors.New("project id is required")
 	}
-	id, err := publicid.Decode(publicid.KindSkill, publicSkillID)
-	if err != nil {
-		return SkillRecord{}, fmt.Errorf("decode skill id: %w", err)
+	if id == uuid.Nil {
+		return SkillRecord{}, errors.New("skill id is required")
 	}
 	row, err := s.q.GetSkillForDispatch(ctx, dbsqlc.GetSkillForDispatchParams{ProjectID: projectID, ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -139,7 +139,7 @@ type ListProjectSkillAccessesResult struct {
 }
 
 func (s *Store) ListSkills(ctx context.Context, input ListSkillsInput) (ListSkillsResult, error) {
-	if isNilUUID(input.OrgID) || isNilUUID(input.Actor.ID) {
+	if input.OrgID == uuid.Nil || input.Actor.ID == uuid.Nil {
 		return ListSkillsResult{}, invalidSkillRequest("org and actor are required")
 	}
 	if input.Limit <= 0 {
@@ -153,7 +153,7 @@ func (s *Store) ListSkills(ctx context.Context, input ListSkillsInput) (ListSkil
 		return ListSkillsResult{}, invalidSkillRequest("unsupported owner kind")
 	}
 	if input.Filters.OwnerKind == SkillOwnerProject {
-		if isNilUUID(input.Filters.OwnerProjectID) {
+		if input.Filters.OwnerProjectID == uuid.Nil {
 			return ListSkillsResult{}, invalidSkillRequest("owner project is required for project owner filter")
 		}
 		if err := s.authorizeSkillRead(ctx, SkillRecord{
@@ -162,7 +162,7 @@ func (s *Store) ListSkills(ctx context.Context, input ListSkillsInput) (ListSkil
 		}, input.Actor); err != nil {
 			return ListSkillsResult{}, err
 		}
-	} else if !isNilUUID(input.Filters.OwnerProjectID) {
+	} else if input.Filters.OwnerProjectID != uuid.Nil {
 		return ListSkillsResult{}, invalidSkillRequest("owner project requires project owner filter")
 	} else if input.Filters.OwnerKind == SkillOwnerOrg {
 		if err := s.authorizeSkillRead(ctx, SkillRecord{
@@ -176,7 +176,7 @@ func (s *Store) ListSkills(ctx context.Context, input ListSkillsInput) (ListSkil
 	params := dbsqlc.ListVisibleOwnedSkillsParams{
 		OrgID:          input.OrgID,
 		OwnerKind:      input.Filters.OwnerKind,
-		OwnerProjectID: sqlcUUIDFromNil(input.Filters.OwnerProjectID),
+		OwnerProjectID: storeutil.IDFromNil(input.Filters.OwnerProjectID),
 		UserID:         actorUserID,
 		OrgApiKeyID:    actorOrgAPIKeyID,
 		RowLimit:       int64(input.Limit) + 1,
@@ -215,7 +215,7 @@ func (s *Store) ListProjectAvailableSkills(
 	ctx context.Context,
 	input ListProjectAvailableSkillsInput,
 ) (ListProjectSkillAccessesResult, error) {
-	if isNilUUID(input.OrgID) || isNilUUID(input.ProjectID) {
+	if input.OrgID == uuid.Nil || input.ProjectID == uuid.Nil {
 		return ListProjectSkillAccessesResult{}, invalidSkillRequest("org and project are required")
 	}
 	if input.Limit <= 0 {
@@ -309,7 +309,7 @@ func (s *Store) GetSkillsByIDsForCompile(
 	ctx context.Context,
 	input GetSkillsByIDsInput,
 ) ([]SkillRecord, []string, error) {
-	if isNilUUID(input.OrgID) {
+	if input.OrgID == uuid.Nil {
 		return nil, nil, errors.New("org id is required")
 	}
 	if len(input.IDs) == 0 {
@@ -363,8 +363,8 @@ func skillRecordFromSQLC(row dbsqlc.GetSkillByIDRow) SkillRecord {
 		ID:             row.ID,
 		OrgID:          row.OrgID,
 		OwnerKind:      row.OwnerKind,
-		OwnerProjectID: uuidFromSQLCPtr(row.OwnerProjectID),
-		OwnerUserID:    uuidFromSQLCPtr(row.OwnerUserID),
+		OwnerProjectID: storeutil.IDFromPtr(row.OwnerProjectID),
+		OwnerUserID:    storeutil.IDFromPtr(row.OwnerUserID),
 		Name:           row.Name,
 		RevisionID:     row.RevisionID,
 		Revision:       row.Revision,

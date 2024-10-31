@@ -502,7 +502,7 @@ func TestDaemonSocketRouteOfferAcceptReportJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create retryable process secret: %v", err)
 	}
-	secretID := testPublicID(t, publicid.KindSecret, secret.ID)
+	secretID := secret.ID.String()
 	if _, err := pool.Exec(ctx, `
 		UPDATE agent_machine_bindings
 		SET secret_env_overlay = jsonb_build_object('API_TOKEN', $1::text)
@@ -1007,7 +1007,7 @@ func loadDaemonRuntimeLeaseForTest(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	runtimeID storage.ID,
+	runtimeID uuid.UUID,
 ) daemonRuntimeLeaseForTest {
 	t.Helper()
 	var record daemonRuntimeLeaseForTest
@@ -1025,7 +1025,7 @@ func expireDaemonRuntimeForHTTPTest(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	runtimeID storage.ID,
+	runtimeID uuid.UUID,
 ) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

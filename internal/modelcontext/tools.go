@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
 	"github.com/omnara-ai/omnara/internal/toolcatalog"
@@ -28,7 +28,7 @@ func WithImplicitIntegrationMessageTool(
 func RuntimeContractToolSpecs(
 	ctx context.Context,
 	store Store,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	contract agentconfig.RuntimeContract,
 	now time.Time,
 ) ([]ToolSpec, error) {
@@ -70,6 +70,7 @@ func RuntimeContractToolSpecs(
 			Name:        tool.Name,
 			Description: description,
 			InputSchema: inputSchema,
+			Deferred:    tool.Deferred,
 			Type:        tool.Type,
 			Permission:  tool.Permission,
 		}
@@ -104,7 +105,7 @@ type mcpToolSnapshot struct {
 func runtimeMCPToolSpecs(
 	ctx context.Context,
 	store Store,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	contract agentconfig.RuntimeContract,
 ) ([]ToolSpec, error) {
 	if len(contract.MCPServers) == 0 {
@@ -133,7 +134,7 @@ func runtimeMCPToolSpecs(
 			)
 		}
 		for _, tool := range tools {
-			permission, ok := server.ResolveTool(tool.Name)
+			resolution, ok := server.ResolveTool(tool.Name)
 			if !ok {
 				continue
 			}
@@ -155,8 +156,9 @@ func runtimeMCPToolSpecs(
 					Name:        name,
 					Description: description,
 					InputSchema: schema,
+					Deferred:    resolution.Deferred,
 					Type:        toolcatalog.ToolTypeMCP,
-					Permission:  permission,
+					Permission:  resolution.Permission,
 				},
 			)
 		}

@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/httpapi/openapi"
 	"github.com/omnara-ai/omnara/internal/modelenvelope"
+	"github.com/omnara-ai/omnara/internal/notifications"
 	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/resourcemeta"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 )
 
-func publicID(kind publicid.Kind, id storage.ID) (string, error) {
+func publicID(kind publicid.Kind, id uuid.UUID) (string, error) {
 	encoded, err := publicid.Encode(kind, id)
 	if err != nil {
 		return "", fmt.Errorf("public id encoding failed for %s %s: %w", kind, id, err)
@@ -123,7 +124,7 @@ func publicAgentInputEvent(
 		ContentBlocks:  blocks,
 		CreatedAt:      record.CreatedAt,
 	}
-	if record.ActorID != storage.NilID {
+	if record.ActorID != uuid.Nil {
 		actorID, err := publicID(publicid.KindActor, record.ActorID)
 		if err != nil {
 			return openapi.AgentEvent{}, err
@@ -140,14 +141,14 @@ func publicAgentInputEvent(
 		}
 		event.ControlType = &controlType
 	}
-	if record.TargetInteractionID != storage.NilID {
+	if record.TargetInteractionID != uuid.Nil {
 		interactionID, err := publicID(publicid.KindAgentInteraction, record.TargetInteractionID)
 		if err != nil {
 			return openapi.AgentEvent{}, err
 		}
 		event.InteractionId = &interactionID
 	}
-	if record.AgentConfigID != storage.NilID {
+	if record.AgentConfigID != uuid.Nil {
 		agentConfigID, err := publicID(publicid.KindAgentConfig, record.AgentConfigID)
 		if err != nil {
 			return openapi.AgentEvent{}, err
@@ -287,14 +288,14 @@ func TurnFromReadRecord(record executionstore.AgentTurnReadRecord) (openapi.Agen
 		StartedAt:     record.StartedAt,
 		UpdatedAt:     record.UpdatedAt,
 	}
-	if record.LatestEvent.ID != storage.NilID {
+	if record.LatestEvent.ID != uuid.Nil {
 		latest, err := EventFromReadRecord(record.LatestEvent)
 		if err != nil {
 			return openapi.AgentTurn{}, err
 		}
 		response.LatestEvent = &latest
 	}
-	if record.LatestSemanticEvent.ID != storage.NilID {
+	if record.LatestSemanticEvent.ID != uuid.Nil {
 		latestSemantic, err := EventFromReadRecord(record.LatestSemanticEvent)
 		if err != nil {
 			return openapi.AgentTurn{}, err
@@ -686,8 +687,8 @@ func publicMediaRefContentBlock(
 			block.Type,
 		)
 	}
-	id, err := storage.ParseID(block.ArtifactID)
-	if err != nil || id == storage.NilID {
+	id, err := uuid.Parse(block.ArtifactID)
+	if err != nil || id == uuid.Nil {
 		return openapi.MediaRefContentBlock{}, fmt.Errorf(
 			"media content block %d has invalid artifact id",
 			index,
@@ -719,8 +720,8 @@ func publicModelToolCallContentBlock(
 			block.Type,
 		)
 	}
-	id, err := storage.ParseID(block.ToolCallID)
-	if err != nil || id == storage.NilID {
+	id, err := uuid.Parse(block.ToolCallID)
+	if err != nil || id == uuid.Nil {
 		return openapi.ModelToolCallContentBlock{}, fmt.Errorf(
 			"tool call content block %d has invalid tool call id",
 			index,
@@ -786,4 +787,20 @@ func publicJSONValue(
 		return nil, nil //nolint:nilnil // A nil blob is the JSON null representation.
 	}
 	return json.RawMessage(bytes.Clone(trimmed)), nil
+}
+
+func ToolCallUpdate(update notifications.ToolCallUpdatedCommitted) (openapi.ToolCallUpdate, error) {
+	state := openapi.ToolCallState(update.State)
+	if !state.Valid() {
+		return openapi.ToolCallUpdate{}, fmt.Errorf("invalid tool call state %q", update.State)
+	}
+	toolCallID, err := publicID(publicid.KindToolCall, update.ToolCallID)
+	if err != nil {
+		return openapi.ToolCallUpdate{}, err
+	}
+	agentID, err := publicID(publicid.KindAgent, update.AgentID)
+	if err != nil {
+		return openapi.ToolCallUpdate{}, err
+	}
+	return openapi.ToolCallUpdate{ToolCallId: toolCallID, AgentId: &agentID, State: state}, nil
 }

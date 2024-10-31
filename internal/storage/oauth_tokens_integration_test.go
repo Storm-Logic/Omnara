@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
@@ -94,7 +95,7 @@ func (f oauthGrantFixture) issueTokens(
 	return tokens
 }
 
-func lockUserForOAuthContention(t *testing.T, ctx context.Context, tx pgx.Tx, userID ID) {
+func lockUserForOAuthContention(t *testing.T, ctx context.Context, tx pgx.Tx, userID uuid.UUID) {
 	t.Helper()
 	if _, err := dbsqlc.New(tx).LockUserForUpdate(ctx, dbsqlc.LockUserForUpdateParams{ID: userID}); err != nil {
 		t.Fatalf("lock user for contention: %v", err)
@@ -181,6 +182,38 @@ func TestOAuthRefreshReplayOfOlderRotatedTokenRevokesGrant(t *testing.T) {
 	}
 	if retired != 0 {
 		t.Fatalf("retired refresh tokens after cleanup = %d, want 0", retired)
+	}
+}
+
+func TestOAuthRefreshRejectsScopeBeyondGrant(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pool := openIntegrationDB(t, ctx)
+	seedMigratedDB(t, ctx, pool)
+	store := newIntegrationStore(pool)
+	fixture := newOAuthGrantFixture(t, ctx, store, "oauth-scope-grant")
+	approval := fixture.approvalInput()
+	approval.Scope = "openid"
+	code, err := store.Identity().CreateOAuthAuthorizationCode(ctx, approval)
+	if err != nil {
+		t.Fatalf("create authorization code: %v", err)
+	}
+	tokens, err := store.Identity().ExchangeOAuthAuthorizationCode(ctx, oauthExchangeInput(code))
+	if err != nil {
+		t.Fatalf("exchange authorization code: %v", err)
+	}
+	escalation := oauthRefreshInput(tokens.RefreshToken)
+	escalation.Scope = "openid email"
+	_, err = store.Identity().RefreshOAuthAccessToken(ctx, escalation)
+	if !errors.Is(err, storeerr.ErrOAuthScopeExceedsGrant) {
+		t.Fatalf("refresh beyond granted scope: err = %v, want scope exceeds grant", err)
+	}
+	refreshed, err := store.Identity().RefreshOAuthAccessToken(ctx, oauthRefreshInput(tokens.RefreshToken))
+	if err != nil {
+		t.Fatalf("refresh within granted scope: %v", err)
+	}
+	if refreshed.Scope != "openid" {
+		t.Fatalf("refreshed scope = %q, want openid", refreshed.Scope)
 	}
 }
 

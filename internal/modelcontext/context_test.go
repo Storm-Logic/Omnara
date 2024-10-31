@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
 	"github.com/omnara-ai/omnara/internal/publicid"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/artifactstore"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
@@ -31,7 +31,7 @@ func contextFixtureJSON(t testing.TB, value any) json.RawMessage {
 	return body
 }
 
-func contextTextEvent(t testing.TB, id storage.ID, sequence int64, text string) executionstore.ContextEventRecord {
+func contextTextEvent(t testing.TB, id uuid.UUID, sequence int64, text string) executionstore.ContextEventRecord {
 	t.Helper()
 	return executionstore.ContextEventRecord{
 		ID:           id,
@@ -94,7 +94,7 @@ func TestBuildKeepsAllMessagesAndCrossTurnToolResultsThroughWatermark(t *testing
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          turnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -168,7 +168,7 @@ func TestBuildPreservesCanonicalAgentInputTextVerbatim(t *testing.T) {
 		`"interaction_id":"int_internal","model_call_context_id":"mcc_internal",` +
 		`"provider_metadata":{"raw":true},"provider_operation_id":"pop_internal",` +
 		`"machine_connection_id":"mcn_internal","machine_connection_generation":7,` +
-		`"agent_machine_binding_id":"smb_internal","machine_ref":"mchr-abc234",` +
+		`"agent_machine_binding_id":"smb_internal","machine_id":"mch_aaaaaaaaaaaaaaaaaaaaaaaaae",` +
 		`"connector_installation_id":"cin_internal","payload":{"raw":"payload raw value",` +
 		`"visible":true,"process_id":"prc_internal","lease_id":"lse_internal"},` +
 		`"runtime_lock_id":"lock_internal","turn_id":"Q2"}`
@@ -186,7 +186,7 @@ func TestBuildPreservesCanonicalAgentInputTextVerbatim(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -296,7 +296,7 @@ func TestBuildDoesNotRewriteToolResultContentByFieldName(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -361,7 +361,7 @@ func TestBuildPreservesStructuredProcessResultValues(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -399,7 +399,7 @@ func TestBuildProjectsIntegrationTargets(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -447,7 +447,6 @@ tools:
 		config: executionstore.AgentConfigRecord{
 			ID:                      testIDN(941),
 			CompiledDefinition:      json.RawMessage(result.CanonicalJSON),
-			CompilerVersion:         agentconfig.CompilerVersion,
 			EffectiveDefinitionHash: result.Hash,
 		},
 		integrationTargets: []integrationstore.IntegrationTargetSummary{{
@@ -462,7 +461,7 @@ tools:
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -547,7 +546,6 @@ type fakeContextStore struct {
 	toolCalls                  []executionstore.ToolCallRecord
 	completedToolCallWatermark int64
 	integrationTargets         []integrationstore.IntegrationTargetSummary
-	machinePools               []executionstore.MachinePoolSourceRecord
 	watermark                  int64
 	checkpoints                []executionstore.ContextCheckpointRecord
 	outputLimitBoundaries      map[int64]bool
@@ -557,16 +555,20 @@ type fakeContextStore struct {
 	mcpConnections             map[string]executionstore.MCPConnectionRecord
 	artifacts                  []artifactstore.ArtifactRecord
 	artifactContent            map[string][]byte
-	artifactBlobReads          []storage.ID
+	artifactBlobReads          []uuid.UUID
 	skills                     map[string]skillstore.SkillRecord
 }
 
 func (s *fakeContextStore) GetSkillForDispatch(
 	_ context.Context,
-	_ storage.ID,
-	publicSkillID string,
+	_ uuid.UUID,
+	publicSkillID uuid.UUID,
 ) (skillstore.SkillRecord, error) {
-	if record, ok := s.skills[publicSkillID]; ok {
+	encoded, err := publicid.Encode(publicid.KindSkill, publicSkillID)
+	if err != nil {
+		return skillstore.SkillRecord{}, err
+	}
+	if record, ok := s.skills[encoded]; ok {
 		return record, nil
 	}
 	return skillstore.SkillRecord{}, storeerr.ErrNotFound
@@ -574,12 +576,12 @@ func (s *fakeContextStore) GetSkillForDispatch(
 
 func (s *fakeContextStore) ListAgentArtifactsByIDs(
 	ctx context.Context,
-	projectID, agentID storage.ID,
-	ids []storage.ID,
+	projectID, agentID uuid.UUID,
+	ids []uuid.UUID,
 ) ([]artifactstore.ArtifactRecord, error) {
 	_ = ctx
 	_ = projectID
-	requested := make(map[storage.ID]bool, len(ids))
+	requested := make(map[uuid.UUID]bool, len(ids))
 	for _, id := range ids {
 		requested[id] = true
 	}
@@ -594,7 +596,7 @@ func (s *fakeContextStore) ListAgentArtifactsByIDs(
 
 func (s *fakeContextStore) GetArtifactBlob(
 	ctx context.Context,
-	projectID, agentID, id storage.ID,
+	projectID, agentID, id uuid.UUID,
 ) ([]byte, artifactstore.ArtifactRecord, error) {
 	_ = ctx
 	_ = projectID
@@ -611,13 +613,13 @@ func (s *fakeContextStore) GetArtifactBlob(
 	return nil, artifactstore.ArtifactRecord{}, storeerr.ErrNotFound
 }
 
-func (s *fakeContextStore) IsOutputLimitBoundary(_ context.Context, _, _ storage.ID, sequence int64) (bool, error) {
+func (s *fakeContextStore) IsOutputLimitBoundary(_ context.Context, _, _ uuid.UUID, sequence int64) (bool, error) {
 	return s.outputLimitBoundaries[sequence], nil
 }
 
 func (s *fakeContextStore) ListContextEvents(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	afterSequence int64,
 	watermark int64,
 	limit int32,
@@ -641,7 +643,7 @@ func (s *fakeContextStore) ListContextEvents(
 
 func (s *fakeContextStore) ListCompletedToolCallsAtWatermark(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	afterEventSequence int64,
 	watermark int64,
 ) ([]executionstore.ToolCallRecord, error) {
@@ -668,7 +670,7 @@ func (s *fakeContextStore) ListCompletedToolCallsAtWatermark(
 
 func (s *fakeContextStore) ListIntegrationTargets(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 ) ([]integrationstore.IntegrationTargetSummary, error) {
 	_ = ctx
 	_ = projectID
@@ -676,20 +678,9 @@ func (s *fakeContextStore) ListIntegrationTargets(
 	return s.integrationTargets, nil
 }
 
-func (s *fakeContextStore) ListMachinePoolSources(
-	ctx context.Context,
-	projectID, agentID, agentConfigID storage.ID,
-) ([]executionstore.MachinePoolSourceRecord, error) {
-	_ = ctx
-	_ = projectID
-	_ = agentID
-	_ = agentConfigID
-	return s.machinePools, nil
-}
-
 func (s *fakeContextStore) GetLatestApplicableContextCheckpoint(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	maxEventSequence int64,
 ) (executionstore.ContextCheckpointRecord, bool, error) {
 	_ = ctx
@@ -711,7 +702,7 @@ func (s *fakeContextStore) GetLatestApplicableContextCheckpoint(
 
 func (s *fakeContextStore) GetAgentConfigForAgent(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 ) (executionstore.AgentConfigRecord, bool, error) {
 	_ = ctx
 	_ = projectID
@@ -727,7 +718,7 @@ func (s *fakeContextStore) GetAgentConfigForAgent(
 
 func (s *fakeContextStore) CaptureAgentConfigForModelContext(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 ) (executionstore.AgentConfigSnapshotRecord, error) {
 	config, found, err := s.GetAgentConfigForAgent(ctx, projectID, agentID)
 	if err != nil {
@@ -741,7 +732,7 @@ func (s *fakeContextStore) CaptureAgentConfigForModelContext(
 
 func (s *fakeContextStore) ListAgentMCPConnections(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 ) ([]executionstore.MCPConnectionRecord, error) {
 	_ = ctx
 	_ = projectID
@@ -761,7 +752,7 @@ func (s *fakeContextStore) ListAgentMCPConnections(
 	return out, nil
 }
 
-func (s *fakeContextStore) MaxEventSequence(ctx context.Context, projectID, agentID storage.ID) (int64, error) {
+func (s *fakeContextStore) MaxEventSequence(ctx context.Context, projectID, agentID uuid.UUID) (int64, error) {
 	_ = ctx
 	_ = projectID
 	_ = agentID
@@ -787,15 +778,15 @@ func TestBuildUsesAgentConfigEnabledToolSpecs(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	if len(bundle.ToolSpecs) != 1 || bundle.ToolSpecs[0].Name != "run_command" {
-		t.Fatalf("expected only enabled run_command tool from config, got %+v", bundle.ToolSpecs)
+	if len(bundle.ToolSpecs) != 3 || bundle.ToolSpecs[1].Name != "run_command" {
+		t.Fatalf("expected run_command and retrieval tools from config, got %+v", bundle.ToolSpecs)
 	}
 }
 
@@ -841,7 +832,7 @@ skills:
 `),
 				agentconfig.CompileOptions{
 					ResolveSkillID: func(id string) (agentconfig.SkillResolution, error) {
-						return agentconfig.SkillResolution{PublicID: id, Name: "pdf-tools"}, nil
+						return agentconfig.SkillResolution{ID: uuid.Must(publicid.Decode(publicid.KindSkill, id)), Name: "pdf-tools"}, nil
 					},
 				},
 			)
@@ -854,7 +845,6 @@ skills:
 				config: executionstore.AgentConfigRecord{
 					ID:                      testIDN(935),
 					CompiledDefinition:      compiled.CanonicalJSON,
-					CompilerVersion:         agentconfig.CompilerVersion,
 					EffectiveDefinitionHash: compiled.Hash,
 				},
 				skills: map[string]skillstore.SkillRecord{
@@ -870,7 +860,7 @@ skills:
 					ProjectID:       testProjectID,
 					AgentID:         testAgentID,
 					TurnID:          testTurnID,
-					OpeningInputIDs: []storage.ID{testInputID},
+					OpeningInputIDs: []uuid.UUID{testInputID},
 					Now:             time.Now().UTC(),
 				},
 			)
@@ -939,17 +929,17 @@ func TestBuildIncludesReadyMCPToolSpecs(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	if len(bundle.ToolSpecs) != 1 {
-		t.Fatalf("expected one mcp tool spec, got %+v", bundle.ToolSpecs)
+	if len(bundle.ToolSpecs) != 3 {
+		t.Fatalf("expected mcp and retrieval tool specs, got %+v", bundle.ToolSpecs)
 	}
-	spec := bundle.ToolSpecs[0]
+	spec := bundle.ToolSpecs[2]
 	if spec.Name != "mcp__docs__greet" ||
 		spec.Type != toolcatalog.ToolTypeMCP ||
 		spec.Permission.Mode != toolpermission.ModeAlwaysAllow ||
@@ -1012,7 +1002,7 @@ skills:
 `),
 		agentconfig.CompileOptions{
 			ResolveSkillID: func(id string) (agentconfig.SkillResolution, error) {
-				return agentconfig.SkillResolution{PublicID: id, Name: "pdf-tools"}, nil
+				return agentconfig.SkillResolution{ID: uuid.Must(publicid.Decode(publicid.KindSkill, id)), Name: "pdf-tools"}, nil
 			},
 		},
 	)
@@ -1021,7 +1011,6 @@ skills:
 	}
 	contract, err := agentconfig.RuntimeContractFromCompiled(
 		compiled.CanonicalJSON,
-		agentconfig.CompilerVersion,
 		compiled.Hash,
 	)
 	if err != nil {
@@ -1038,92 +1027,11 @@ skills:
 	if err != nil {
 		t.Fatalf("build runtime tool specs: %v", err)
 	}
-	if len(specs) != 1 ||
-		specs[0].Name != "skill" ||
-		specs[0].Permission.Mode != toolpermission.ModeAlwaysAsk ||
-		!strings.Contains(specs[0].Description, "available_skills catalog") {
+	if len(specs) != 3 ||
+		specs[2].Name != "skill" ||
+		specs[2].Permission.Mode != toolpermission.ModeAlwaysAsk ||
+		!strings.Contains(specs[2].Description, "available_skills catalog") {
 		t.Fatalf("runtime tool specs = %+v, want one explicit skill tool", specs)
-	}
-}
-
-func TestBuildIncludesAvailableMachinePoolsWhenCreateToolEnabled(t *testing.T) {
-	store := &fakeContextStore{
-		watermark: 1,
-		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, "create_machine"),
-		machinePools: []executionstore.MachinePoolSourceRecord{{
-			MachinePoolName: "Build Pool",
-			Description:     "Build pool",
-		}},
-	}
-	store.messages = append(
-		store.messages,
-		executionstore.ContextEventRecord{
-			ID:           testIDN(931),
-			ProjectID:    testProjectID,
-			AgentID:      testAgentID,
-			Sequence:     1,
-			Role:         modelprotocol.RoleUser,
-			ContentParts: contextFixtureJSON(t, []map[string]string{{"type": "text", "text": "hi"}}),
-		},
-	)
-	bundle, err := (Builder{Store: store}).Build(
-		context.Background(),
-		BuildInput{
-			ProjectID:       testProjectID,
-			AgentID:         testAgentID,
-			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
-			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	if len(bundle.AvailableMachinePools) != 1 {
-		t.Fatalf("expected one machine pool, got %+v", bundle.AvailableMachinePools)
-	}
-	pool := bundle.AvailableMachinePools[0]
-	if pool.MachinePoolName != "Build Pool" || pool.Description != "Build pool" {
-		t.Fatalf("unexpected machine pool context: %+v", pool)
-	}
-}
-
-func TestBuildOmitsAvailableMachinePoolsWhenCreateToolDisabled(t *testing.T) {
-	store := &fakeContextStore{
-		watermark: 1,
-		hasConfig: true,
-		config:    testAgentConfigRecordWithTools(t, "list_machines"),
-		machinePools: []executionstore.MachinePoolSourceRecord{{
-			MachinePoolName: "Build Pool",
-		}},
-	}
-	store.messages = append(
-		store.messages,
-		executionstore.ContextEventRecord{
-			ID:           testIDN(932),
-			ProjectID:    testProjectID,
-			AgentID:      testAgentID,
-			Sequence:     1,
-			Role:         modelprotocol.RoleUser,
-			ContentParts: contextFixtureJSON(t, []map[string]string{{"type": "text", "text": "hi"}}),
-		},
-	)
-	bundle, err := (Builder{Store: store}).Build(
-		context.Background(),
-		BuildInput{
-			ProjectID:       testProjectID,
-			AgentID:         testAgentID,
-			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
-			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
-		},
-	)
-	if err != nil {
-		t.Fatalf("build context: %v", err)
-	}
-	if len(bundle.AvailableMachinePools) != 0 {
-		t.Fatalf("expected no machine pools, got %+v", bundle.AvailableMachinePools)
 	}
 }
 
@@ -1135,7 +1043,7 @@ func TestBuildRequiresPinnedAgentConfig(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -1200,7 +1108,7 @@ func TestBuildUsesLatestApplicableCheckpointAndUnsummarizedTail(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -1249,7 +1157,7 @@ func TestBuildIgnoresCheckpointPublishedAfterFixedFrontier(t *testing.T) {
 			ProjectID:       testProjectID,
 			AgentID:         testAgentID,
 			TurnID:          testTurnID,
-			OpeningInputIDs: []storage.ID{testInputID},
+			OpeningInputIDs: []uuid.UUID{testInputID},
 			Now:             time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
 		},
 	)
@@ -1277,7 +1185,6 @@ model:
 	return executionstore.AgentConfigRecord{
 		ID:                      testIDN(500),
 		CompiledDefinition:      json.RawMessage(result.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: result.Hash,
 	}
 }
@@ -1301,7 +1208,6 @@ tools:
 	return executionstore.AgentConfigRecord{
 		ID:                      testIDN(501),
 		CompiledDefinition:      json.RawMessage(result.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: result.Hash,
 	}
 }
@@ -1331,7 +1237,6 @@ mcp:
 	return executionstore.AgentConfigRecord{
 		ID:                      testIDN(980),
 		CompiledDefinition:      json.RawMessage(result.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: result.Hash,
 	}
 }

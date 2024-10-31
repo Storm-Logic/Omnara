@@ -3,14 +3,22 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 )
+
+func TestSubagentStorageFailurePreservesInfrastructureError(t *testing.T) {
+	cause := errors.New("database unavailable")
+	result, err := failSubagentTransactionForStorageError("spawn_agent_failed", cause)
+	if result != nil || !errors.Is(err, cause) {
+		t.Fatalf("result = %v, error = %v, want unchanged infrastructure error", result, err)
+	}
+}
 
 func TestSubagentToolInputValidation(t *testing.T) {
 	for _, test := range []struct {
@@ -122,15 +130,15 @@ type recordingPoolMachineManager struct {
 	deleted [][]executionstore.MachineRecord
 }
 
-func (m *recordingPoolMachineManager) ProvisionMachine(context.Context, storage.ID, storage.ID) error {
+func (m *recordingPoolMachineManager) ProvisionMachine(context.Context, uuid.UUID, uuid.UUID) error {
 	return nil
 }
 
 func (m *recordingPoolMachineManager) StartLaunchProvisioning(
 	context.Context,
 	*slog.Logger,
-	storage.ID,
-	[]storage.ID,
+	uuid.UUID,
+	[]uuid.UUID,
 ) {
 }
 
@@ -149,7 +157,7 @@ func (m *recordingPoolMachineManager) DeleteMachines(
 	return len(machines), nil
 }
 
-func (m *recordingPoolMachineManager) WakeMachine(context.Context, storage.ID, storage.ID) (bool, error) {
+func (m *recordingPoolMachineManager) WakeMachine(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return false, nil
 }
 

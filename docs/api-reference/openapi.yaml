@@ -220,7 +220,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [startup_script, daemon_install, daemon_update, daemon_uninstall, daemon_uninstalled]
+            enum: [startup_script, daemon_install, daemon_update, daemon_runtime, daemon_uninstall, daemon_uninstalled]
         - name: exit_status
           in: query
           required: false
@@ -568,9 +568,19 @@ paths:
       summary: Get org overview
       description: >-
         Returns the data backing the web app's overview page: the caller's visible
-        projects plus the most recently active agents and most recently updated
-        agent profiles across every project the caller can read. Internal to the
-        web app and subject to change without notice.
+        projects, the most recently active agents and most recently updated agent
+        profiles, today's activity, and the last 30 days of model usage across the
+        projects the caller can read. Internal to the web app and subject to change
+        without notice.
+      parameters:
+        - name: timezone
+          in: query
+          required: false
+          schema:
+            type: string
+            default: UTC
+            maxLength: 64
+          description: IANA time zone that decides where today and each day of `usage` start.
       responses:
         '200':
           description: Overview data for the organization.
@@ -578,6 +588,47 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OrgOverviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+  /orgs/{orgID}/usage:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/OrganizationID'
+    get:
+      operationId: getOrgUsage
+      tags: [Organizations and Projects]
+      summary: Get org usage
+      description: >-
+        Tallies model token usage and provider-reported cost across every
+        agent in the organization, broken down by configured model. Optionally
+        limits the tally to a time window or to a subset of projects.
+      parameters:
+        - $ref: '#/components/parameters/UsageSince'
+        - $ref: '#/components/parameters/UsageUntil'
+        - $ref: '#/components/parameters/UsageIncludeProjectIDs'
+        - $ref: '#/components/parameters/UsageExcludeProjectIDs'
+      responses:
+        '200':
+          description: Usage totals for the organization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -716,6 +767,48 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+  /orgs/{orgID}/projects/{projectID}/usage:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/OrganizationID'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ProjectID'
+    get:
+      operationId: getProjectUsage
+      tags: [Organizations and Projects]
+      summary: Get project usage
+      description: >-
+        Tallies model token usage and provider-reported cost across every
+        agent in the project, including subagents, broken down by configured model.
+        Optionally limits the tally to a time window.
+      parameters:
+        - $ref: '#/components/parameters/UsageSince'
+        - $ref: '#/components/parameters/UsageUntil'
+      responses:
+        '200':
+          description: Usage totals for the project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
         '4XX':
@@ -1990,7 +2083,7 @@ paths:
       summary: Delete secret
       description: >-
         Deletes the secret and permanently destroys all of its versions and project grants; the
-        ciphertext cannot be recovered. Deletion is blocked while the secret is referenced by a
+        ciphertext cannot be recovered. Deletion is blocked while the secret is the credential of a
         model provider config, machine pool, or integration install.
       security:
         - bearerAuth: []
@@ -2277,6 +2370,58 @@ paths:
           $ref: '#/components/responses/ClientError'
         '5XX':
           $ref: '#/components/responses/ServerError'
+  /orgs/{orgID}/projects/{projectID}/agent-configs/tools:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/OrganizationID'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ProjectID'
+    post:
+      operationId: resolveAgentConfigTools
+      tags: [Configs and Profiles]
+      summary: Resolve agent config tools
+      description: >-
+        Returns configured built-in and custom tools plus missing machine, skill, subagent, and retrieval
+        defaults, including disabled entries. Accepts YAML/JSON source. Source
+        previews validate tool-related fields only; they do not validate whether
+        the config can be saved or launched. Does not resolve contextual integration
+        tools, discover MCP tools, or
+        change any configuration.
+      security:
+        - bearerAuth: []
+        - browserSessionCookie: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveAgentConfigToolsRequest'
+      responses:
+        '200':
+          description: Resolved config tools.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResolvedAgentConfigTools'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /orgs/{orgID}/projects/{projectID}/agent-configs:
     parameters:
       - name: orgID
@@ -2705,6 +2850,62 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+  /orgs/{orgID}/projects/{projectID}/agent-profiles/{agentProfileID}/usage:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/OrganizationID'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ProjectID'
+      - name: agentProfileID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/AgentProfileID'
+    get:
+      operationId: getAgentProfileUsage
+      tags: [Configs and Profiles]
+      summary: Get agent profile usage
+      description: >-
+        Tallies model token usage and provider-reported cost across the
+        top-level agents launched from this profile, broken down by configured
+        model. Usage from subagents those agents spawned is included only when
+        `include_subagents` is true. Optionally limits the tally to a time window.
+      parameters:
+        - $ref: '#/components/parameters/UsageSince'
+        - $ref: '#/components/parameters/UsageUntil'
+        - name: include_subagents
+          in: query
+          required: false
+          description: >-
+            Also include usage from subagents spawned, at every depth, by
+            agents launched from this profile. Defaults to false.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Usage totals for the agent profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
         '4XX':
@@ -3264,6 +3465,61 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '4XX':
+          $ref: '#/components/responses/ClientError'
+        '5XX':
+          $ref: '#/components/responses/ServerError'
+  /orgs/{orgID}/projects/{projectID}/agents/{agentID}/usage:
+    parameters:
+      - name: orgID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/OrganizationID'
+      - name: projectID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/ProjectID'
+      - name: agentID
+        in: path
+        required: true
+        schema:
+          $ref: '#/components/schemas/AgentID'
+    get:
+      operationId: getAgentUsage
+      tags: [Agents]
+      summary: Get agent usage
+      description: >-
+        Tallies this agent's model token usage and provider-reported cost,
+        broken down by configured model. Optionally limits the tally to a time
+        window.
+      parameters:
+        - $ref: '#/components/parameters/UsageSince'
+        - $ref: '#/components/parameters/UsageUntil'
+        - name: include_subagents
+          in: query
+          required: false
+          description: >-
+            Also include usage from this agent's subagents at every depth.
+            Defaults to false.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Usage totals for the agent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
         '4XX':
@@ -6594,6 +6850,52 @@ components:
       bearerFormat: Omnara machine daemon token
       description: An opaque Omnara machine-daemon bearer token. The bootstrap route derives the organization, installation, and machine identity from the credential; runtime routes verify that the addressed runtime belongs to the token-derived machine.
   parameters:
+    UsageSince:
+      name: since
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: >-
+        Only tally model calls started at or after this instant. Omit to start
+        from the earliest recorded call.
+    UsageUntil:
+      name: until
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: >-
+        Only tally model calls started before this instant. Must be later than
+        `since` when both are given. Omit to include calls up to now.
+    UsageIncludeProjectIDs:
+      name: include_project_ids
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 100
+        items:
+          $ref: '#/components/schemas/ProjectID'
+      description: >-
+        Only tally model calls from these projects. Cannot be combined with
+        `exclude_project_ids`.
+    UsageExcludeProjectIDs:
+      name: exclude_project_ids
+      in: query
+      required: false
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 100
+        items:
+          $ref: '#/components/schemas/ProjectID'
+      description: >-
+        Tally model calls from every project except these. Cannot be combined
+        with `include_project_ids`.
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -6902,19 +7204,6 @@ components:
             - validation_failed
             - csrf_check_failed
             - authentication_unavailable
-    Warning:
-      type: object
-      additionalProperties: false
-      required: [message, code]
-      properties:
-        message:
-          type: string
-          description: Human-readable warning message. Do not match on it programmatically.
-        code:
-          type: string
-          description: Stable warning code for programmatic handling.
-          enum:
-            - missing_recommended_machine_tools
     ClientErrorCode:
       type: string
       description: Stable error code carried by 4XX statuses. Subset of the Error code enum whose statuses are client errors.
@@ -7140,6 +7429,16 @@ components:
               maxLength: 64
         credential_secret_id:
           $ref: '#/components/schemas/SecretID'
+        headers:
+          type: object
+          description: Extra HTTP headers sent with every request to this provider. Values are stored and returned as plain text; use secret_headers for keys and tokens.
+          additionalProperties:
+            type: string
+        secret_headers:
+          type: object
+          description: Extra HTTP headers whose values come from org-owned generic secrets, mapping header names to secret references.
+          additionalProperties:
+            $ref: '#/components/schemas/SecretID'
     UpdateModelProviderConfigRequest:
       type: object
       description: Update a provider config. Omitted fields keep their current values.
@@ -7186,10 +7485,20 @@ components:
               maxLength: 64
         credential_secret_id:
           $ref: '#/components/schemas/SecretID'
+        headers:
+          type: object
+          description: Extra HTTP headers sent with every request to this provider. Values are stored and returned as plain text; use secret_headers for keys and tokens. Replaces all headers when provided.
+          additionalProperties:
+            type: string
+        secret_headers:
+          type: object
+          description: Extra HTTP headers whose values come from org-owned generic secrets, mapping header names to secret references. Replaces all secret headers when provided.
+          additionalProperties:
+            $ref: '#/components/schemas/SecretID'
     ModelProviderConfig:
       type: object
       additionalProperties: false
-      required: [id, org_id, management_kind, name, api_format, api_variant, base_url, endpoint_path, request_timeout_ms, idle_timeout_ms, auth_kind, auth_options, credential_secret_id, created_at, updated_at]
+      required: [id, org_id, management_kind, name, api_format, api_variant, base_url, endpoint_path, request_timeout_ms, idle_timeout_ms, auth_kind, auth_options, credential_secret_id, headers, secret_headers, created_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/ModelProviderConfigID'
@@ -7234,6 +7543,16 @@ components:
               maxLength: 64
         credential_secret_id:
           $ref: '#/components/schemas/SecretID'
+        headers:
+          type: object
+          description: Extra HTTP headers sent with every request to this provider.
+          additionalProperties:
+            type: string
+        secret_headers:
+          type: object
+          description: Extra HTTP headers whose values come from the referenced secrets.
+          additionalProperties:
+            $ref: '#/components/schemas/SecretID'
         created_at:
           $ref: '#/components/schemas/Timestamp'
         updated_at:
@@ -7284,6 +7603,30 @@ components:
           minimum: 1
           maximum: 2147483647
           description: Provider-advertised maximum output limit in tokens, when available.
+        pricing:
+          $ref: '#/components/schemas/DiscoveredModelPricing'
+    DiscoveredModelPricing:
+      type: object
+      additionalProperties: false
+      description: >-
+        Provider-advertised list prices in USD per million tokens, as exact decimal
+        strings. Present only when the provider publishes pricing in its model
+        catalog (OpenRouter). Cache prices are omitted when the provider does not
+        publish them.
+      required: [input_usd_per_million, output_usd_per_million]
+      properties:
+        input_usd_per_million:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+        cache_read_input_usd_per_million:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+        cache_write_input_usd_per_million:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+        output_usd_per_million:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
     ModelProviderConfigList:
       type: object
       additionalProperties: false
@@ -7668,7 +8011,7 @@ components:
     ConfiguredModelSummary:
       type: object
       additionalProperties: false
-      required: [id, org_id, model_provider_config_id, name, provider_config, created_at, updated_at]
+      required: [id, org_id, model_provider_config_id, name, provider_config, provider_model_slug, created_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/ConfiguredModelID'
@@ -7682,6 +8025,9 @@ components:
         provider_config:
           $ref: '#/components/schemas/ResourceName'
           description: Name of the provider config that owns this model, used by agent YAML as model.provider_config.
+        provider_model_slug:
+          type: string
+          description: Exact provider model slug sent to the provider endpoint by the current revision.
         created_at:
           $ref: '#/components/schemas/Timestamp'
         updated_at:
@@ -8189,6 +8535,37 @@ components:
           format: uri
         expires_at:
           $ref: '#/components/schemas/Timestamp'
+    ResolveAgentConfigToolsRequest:
+      type: object
+      additionalProperties: false
+      required: [source, source_format]
+      properties:
+        source:
+          type: string
+          minLength: 1
+        source_format:
+          type: string
+          enum: [yaml, json]
+    ResolvedAgentConfigTools:
+      type: object
+      additionalProperties: false
+      required: [tools]
+      properties:
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResolvedAgentConfigTool'
+    ResolvedAgentConfigTool:
+      type: object
+      additionalProperties: false
+      required: [name, enabled, permission]
+      properties:
+        name:
+          type: string
+        enabled:
+          type: boolean
+        permission:
+          $ref: '#/components/schemas/ToolPermissionSelection'
     CreateAgentConfigRequest:
       type: object
       additionalProperties: false
@@ -8262,6 +8639,9 @@ components:
           type: string
         description:
           type: string
+        implicit:
+          type: boolean
+          description: Whether this tool supports implicit inclusion based on config resources or integration context, even when explicitly configured.
         default_permission:
           $ref: '#/components/schemas/ToolPermissionSelection'
         permission_modes:
@@ -8590,7 +8970,362 @@ components:
           type: array
           items:
             type: string
-    AgentConfig:
+    CompiledAgentConfig:
+      type: object
+      additionalProperties: false
+      description: Read-only saved compiled configuration, including default tools and derived subagent overrides.
+      required: [instruction, model]
+      properties:
+        version:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        instruction:
+          type: string
+        model:
+          $ref: '#/components/schemas/CompiledAgentModel'
+        machine_sources:
+          type: array
+          x-go-type-skip-optional-pointer: true
+          items:
+            $ref: '#/components/schemas/CompiledMachineSource'
+        tools:
+          type: object
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            $ref: '#/components/schemas/CompiledTool'
+        mcp:
+          type: object
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            $ref: '#/components/schemas/CompiledMCPServer'
+        event_webhook:
+          $ref: '#/components/schemas/CompiledEventWebhook'
+        skills:
+          type: array
+          x-go-type-skip-optional-pointer: true
+          items:
+            $ref: '#/components/schemas/CompiledSkill'
+        subagents:
+          type: object
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            $ref: '#/components/schemas/CompiledSubagent'
+        max_subagents:
+          type: integer
+        max_depth:
+          type: integer
+    CompiledEventWebhook:
+      type: object
+      additionalProperties: false
+      required: [url, events]
+      properties:
+        url:
+          type: string
+        events:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [agent_input, model_output, tool_result, context_checkpoint, tool_call_update]
+        signing_secret_id:
+          $ref: '#/components/schemas/SecretID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+    CompiledAgentModel:
+      type: object
+      additionalProperties: false
+      required: [configured_model_id]
+      properties:
+        configured_model_id:
+          $ref: '#/components/schemas/ConfiguredModelID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+        context_window_tokens:
+          type: integer
+        default_max_output_tokens:
+          type: integer
+        cache_retention:
+          $ref: '#/components/schemas/ModelCacheRetention'
+          x-go-type-skip-optional-pointer: true
+        reasoning:
+          $ref: '#/components/schemas/CompiledModelReasoning'
+    CompiledModelReasoning:
+      type: object
+      additionalProperties: false
+      required: [effort]
+      properties:
+        effort:
+          type: string
+    CompiledMachineSource:
+      type: object
+      additionalProperties: false
+      properties:
+        machine_id:
+          $ref: '#/components/schemas/MachineID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+        machine_pool_id:
+          $ref: '#/components/schemas/MachinePoolID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+        max_machines:
+          type: integer
+          x-go-type-skip-optional-pointer: true
+        initial_num_machines:
+          type: integer
+          x-go-type-skip-optional-pointer: true
+        delete_after_idle_minutes:
+          type: integer
+        cwd:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        machine_cpu:
+          type: integer
+        machine_memory_mb:
+          type: integer
+        env_overlay:
+          type: object
+          x-go-type: map[string]*string
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            type: [string, "null"]
+        secret_env_overlay:
+          type: object
+          x-go-type: map[string]*publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            oneOf:
+              - $ref: '#/components/schemas/SecretID'
+              - type: "null"
+        machine_provider_options_overlay:
+          type: object
+          x-go-type: map[string]json.RawMessage
+          x-go-type-skip-optional-pointer: true
+          additionalProperties: true
+        description:
+          type: string
+          x-go-type-skip-optional-pointer: true
+    CompiledTool:
+      type: object
+      additionalProperties: false
+      required: [enabled, permission]
+      properties:
+        enabled:
+          type: boolean
+        type:
+          type: string
+          enum: [built_in, custom]
+          x-enum-varnames: [CompiledToolTypeBuiltIn, CompiledToolTypeCustom]
+          x-go-type-skip-optional-pointer: true
+        permission:
+          $ref: '#/components/schemas/ToolPermissionSelection'
+          x-go-type: toolpermission.Selection
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/toolpermission
+        deferred:
+          type: boolean
+          x-go-type-skip-optional-pointer: true
+        description:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        input_schema:
+          type: object
+          additionalProperties: true
+          x-go-type: json.RawMessage
+          x-go-type-skip-optional-pointer: true
+    CompiledMCPServer:
+      type: object
+      additionalProperties: false
+      required: [url, default_enabled, permission]
+      properties:
+        url:
+          type: string
+        auth:
+          $ref: '#/components/schemas/CompiledMCPAuth'
+        default_enabled:
+          type: boolean
+        permission:
+          $ref: '#/components/schemas/ToolPermissionSelection'
+          x-go-type: toolpermission.Selection
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/toolpermission
+        deferred:
+          type: boolean
+          x-go-type-skip-optional-pointer: true
+        tools:
+          type: object
+          x-go-type-skip-optional-pointer: true
+          additionalProperties:
+            $ref: '#/components/schemas/CompiledMCPTool'
+    CompiledMCPAuth:
+      oneOf:
+        - $ref: '#/components/schemas/CompiledMCPAuthBearer'
+        - $ref: '#/components/schemas/CompiledMCPAuthOAuth'
+        - $ref: '#/components/schemas/CompiledMCPAuthSigV4'
+      discriminator:
+        propertyName: type
+        mapping:
+          bearer: '#/components/schemas/CompiledMCPAuthBearer'
+          oauth: '#/components/schemas/CompiledMCPAuthOAuth'
+          sigv4: '#/components/schemas/CompiledMCPAuthSigV4'
+    CompiledMCPAuthBearer:
+      type: object
+      additionalProperties: false
+      required: [type, secret_id]
+      properties:
+        type:
+          type: string
+          enum: [bearer]
+          x-enum-varnames: [CompiledMCPAuthBearerTypeBearer]
+        secret_id:
+          $ref: '#/components/schemas/SecretID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+    CompiledMCPAuthOAuth:
+      type: object
+      additionalProperties: false
+      required: [type, secret_id]
+      properties:
+        type:
+          type: string
+          enum: [oauth]
+          x-enum-varnames: [CompiledMCPAuthOAuthTypeOAuth]
+        secret_id:
+          $ref: '#/components/schemas/SecretID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+    CompiledMCPAuthSigV4:
+      type: object
+      additionalProperties: false
+      required: [type, secret_id, service, region]
+      properties:
+        type:
+          type: string
+          enum: [sigv4]
+          x-enum-varnames: [CompiledMCPAuthSigV4TypeSigV4]
+        secret_id:
+          $ref: '#/components/schemas/SecretID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+        service:
+          type: string
+          minLength: 1
+        region:
+          type: string
+          minLength: 1
+    CompiledMCPTool:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        permission:
+          $ref: '#/components/schemas/ToolPermissionSelection'
+          x-go-type: toolpermission.Selection
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/toolpermission
+        deferred:
+          type: boolean
+    CompiledSkill:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id:
+          $ref: '#/components/schemas/SkillID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+    CompiledSubagent:
+      oneOf:
+        - $ref: '#/components/schemas/CompiledSelfSubagent'
+        - $ref: '#/components/schemas/CompiledProfileSubagent'
+      discriminator:
+        propertyName: type
+        mapping:
+          self: '#/components/schemas/CompiledSelfSubagent'
+          profile: '#/components/schemas/CompiledProfileSubagent'
+    CompiledSelfSubagent:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [self]
+          x-enum-varnames: [CompiledSelfSubagentTypeSelf]
+        description:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        model:
+          $ref: '#/components/schemas/CompiledSubagentModel'
+        instruction_append:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        max_instances:
+          type: integer
+        archive_after_idle_minutes:
+          type: integer
+    CompiledProfileSubagent:
+      type: object
+      additionalProperties: false
+      required: [type, profile_id]
+      properties:
+        type:
+          type: string
+          enum: [profile]
+          x-enum-varnames: [CompiledProfileSubagentTypeProfile]
+        profile_id:
+          $ref: '#/components/schemas/AgentProfileID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+        description:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        model:
+          $ref: '#/components/schemas/CompiledSubagentModel'
+        instruction_append:
+          type: string
+          x-go-type-skip-optional-pointer: true
+        max_instances:
+          type: integer
+        archive_after_idle_minutes:
+          type: integer
+    CompiledSubagentModel:
+      type: object
+      additionalProperties: false
+      properties:
+        configured_model_id:
+          $ref: '#/components/schemas/ConfiguredModelID'
+          x-go-type: publicid.ID
+          x-go-type-import:
+            path: github.com/omnara-ai/omnara/internal/publicid
+          x-go-type-skip-optional-pointer: true
+        context_window_tokens:
+          type: integer
+        default_max_output_tokens:
+          type: integer
+        cache_retention:
+          $ref: '#/components/schemas/ModelCacheRetention'
+          x-go-type-skip-optional-pointer: true
+        reasoning:
+          $ref: '#/components/schemas/CompiledModelReasoning'
+    AgentConfigSummary:
       type: object
       additionalProperties: false
       required: [id, org_id, project_id, effective_definition_hash, model, created_at]
@@ -8606,23 +9341,40 @@ components:
         source_format:
           type: string
           enum: [yaml, json]
-        compiler_version:
-          type: string
         effective_definition_hash:
           type: string
         model:
           $ref: '#/components/schemas/AgentConfigModel'
         instruction_hash:
           type: string
-        warnings:
-          type: array
-          minItems: 1
-          x-go-type-skip-optional-pointer: true
-          description: Non-blocking diagnostics about the agent config.
-          items:
-            $ref: '#/components/schemas/Warning'
         created_at:
           $ref: '#/components/schemas/Timestamp'
+    AgentConfig:
+      type: object
+      additionalProperties: false
+      required: [id, org_id, project_id, effective_definition_hash, model, created_at, compiled_definition]
+      properties:
+        id:
+          $ref: '#/components/schemas/AgentConfigID'
+        org_id:
+          $ref: '#/components/schemas/OrganizationID'
+        project_id:
+          $ref: '#/components/schemas/ProjectID'
+        source:
+          type: string
+        source_format:
+          type: string
+          enum: [yaml, json]
+        effective_definition_hash:
+          type: string
+        model:
+          $ref: '#/components/schemas/AgentConfigModel'
+        instruction_hash:
+          type: string
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        compiled_definition:
+          $ref: '#/components/schemas/CompiledAgentConfig'
     CreateAgentProfileRequest:
       type: object
       additionalProperties: false
@@ -8648,6 +9400,30 @@ components:
       properties:
         name:
           $ref: '#/components/schemas/ResourceName'
+    AgentProfileSummary:
+      type: object
+      additionalProperties: false
+      required: [id, org_id, project_id, name, current_config_id, current_generation, current_config, created_at, updated_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/AgentProfileID'
+        org_id:
+          $ref: '#/components/schemas/OrganizationID'
+        project_id:
+          $ref: '#/components/schemas/ProjectID'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        current_config_id:
+          $ref: '#/components/schemas/AgentConfigID'
+        current_generation:
+          type: integer
+          format: int32
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+        current_config:
+          $ref: '#/components/schemas/AgentConfigSummary'
     AgentProfile:
       type: object
       additionalProperties: false
@@ -8666,12 +9442,12 @@ components:
         current_generation:
           type: integer
           format: int32
-        current_config:
-          $ref: '#/components/schemas/AgentConfig'
         created_at:
           $ref: '#/components/schemas/Timestamp'
         updated_at:
           $ref: '#/components/schemas/Timestamp'
+        current_config:
+          $ref: '#/components/schemas/AgentConfig'
     ListAgentProfilesResponse:
       type: object
       additionalProperties: false
@@ -8680,7 +9456,7 @@ components:
         data:
           type: array
           items:
-            $ref: '#/components/schemas/AgentProfile'
+            $ref: '#/components/schemas/AgentProfileSummary'
         next_cursor:
           type: [string, "null"]
           description: Opaque cursor for the next page, or null when this is the last page.
@@ -9294,7 +10070,7 @@ components:
     AgentMachineBinding:
       type: object
       additionalProperties: false
-      required: [id, project_id, agent_id, machine_id, machine_ref, binding_kind, state, description, cwd, env_overlay, secret_env_overlay, created_at, updated_at]
+      required: [id, project_id, agent_id, machine_id, binding_kind, state, description, cwd, env_overlay, secret_env_overlay, created_at, updated_at]
       properties:
         id:
           $ref: '#/components/schemas/AgentMachineBindingID'
@@ -9304,8 +10080,6 @@ components:
           $ref: '#/components/schemas/AgentID'
         machine_id:
           $ref: '#/components/schemas/MachineID'
-        machine_ref:
-          type: string
         binding_kind:
           $ref: '#/components/schemas/AgentMachineBindingKind'
         state:
@@ -9333,14 +10107,15 @@ components:
     MachineFailureReport:
       description: >-
         The machine's most recent daemon-reported failure. A single slot,
-        overwritten by newer reports and cleared when the daemon recovers.
+        overwritten by newer reports. Runtime crash reports remain as historical
+        diagnostics; recovery may clear other failure stages.
       type: object
       additionalProperties: false
       required: [stage, output_tail, output_truncated, reported_at]
       properties:
         stage:
           type: string
-          enum: [startup_script, daemon_install, daemon_update, daemon_uninstall, daemon_uninstalled]
+          enum: [startup_script, daemon_install, daemon_update, daemon_runtime, daemon_uninstall, daemon_uninstalled]
         exit_status:
           type: integer
         output_tail:
@@ -9510,8 +10285,8 @@ components:
           $ref: '#/components/schemas/Timestamp'
     ToolCallUpdate:
       description: >-
-        An ephemeral notification that a tool call entered a lifecycle state.
-        Sent for the streamed agent and for every subagent beneath it, so
+        A notification that a tool call entered a lifecycle state.
+        On the event stream, this is ephemeral and sent for the streamed agent and every subagent beneath it, so
         questions, permission requests, and custom tool calls anywhere in the
         tree surface here; query the list endpoints with `include_subagents`
         for the current rows.
@@ -9749,6 +10524,77 @@ components:
           type: string
         created_at:
           $ref: '#/components/schemas/Timestamp'
+    EventWebhookPayload:
+      description: JSON body posted to an agent configuration's event webhook. Each event name determines its data schema.
+      oneOf:
+        - $ref: '#/components/schemas/EventWebhookAgentInputEvent'
+        - $ref: '#/components/schemas/EventWebhookModelOutputEvent'
+        - $ref: '#/components/schemas/EventWebhookToolResultEvent'
+        - $ref: '#/components/schemas/EventWebhookContextCheckpointEvent'
+        - $ref: '#/components/schemas/EventWebhookToolCallUpdate'
+      discriminator:
+        propertyName: event
+        mapping:
+          agent_input: '#/components/schemas/EventWebhookAgentInputEvent'
+          model_output: '#/components/schemas/EventWebhookModelOutputEvent'
+          tool_result: '#/components/schemas/EventWebhookToolResultEvent'
+          context_checkpoint: '#/components/schemas/EventWebhookContextCheckpointEvent'
+          tool_call_update: '#/components/schemas/EventWebhookToolCallUpdate'
+    EventWebhookAgentInputEvent:
+      type: object
+      additionalProperties: false
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum: [agent_input]
+          x-enum-varnames: [EventWebhookEventAgentInput]
+        data:
+          $ref: '#/components/schemas/AgentInputEvent'
+    EventWebhookModelOutputEvent:
+      type: object
+      additionalProperties: false
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum: [model_output]
+          x-enum-varnames: [EventWebhookEventModelOutput]
+        data:
+          $ref: '#/components/schemas/ModelOutputEvent'
+    EventWebhookToolResultEvent:
+      type: object
+      additionalProperties: false
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum: [tool_result]
+          x-enum-varnames: [EventWebhookEventToolResult]
+        data:
+          $ref: '#/components/schemas/ToolResultEvent'
+    EventWebhookContextCheckpointEvent:
+      type: object
+      additionalProperties: false
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum: [context_checkpoint]
+          x-enum-varnames: [EventWebhookEventContextCheckpoint]
+        data:
+          $ref: '#/components/schemas/ContextCheckpointEvent'
+    EventWebhookToolCallUpdate:
+      type: object
+      additionalProperties: false
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum: [tool_call_update]
+          x-enum-varnames: [EventWebhookEventToolCallUpdate]
+        data:
+          $ref: '#/components/schemas/ToolCallUpdate'
     AgentEvent:
       oneOf:
         - $ref: '#/components/schemas/AgentInputEvent'
@@ -12216,7 +13062,7 @@ components:
     OrgOverviewResponse:
       type: object
       additionalProperties: false
-      required: [projects, recent_agents, recent_agent_profiles]
+      required: [projects, recent_agents, recent_agent_profiles, referenced_agent_profiles, today, usage]
       properties:
         projects:
           type: array
@@ -12236,7 +13082,266 @@ components:
             Most recently updated agent profiles across the caller's readable
             projects, ordered by updated_at descending.
           items:
-            $ref: '#/components/schemas/AgentProfile'
+            $ref: '#/components/schemas/AgentProfileSummary'
+        referenced_agent_profiles:
+          type: array
+          description: >-
+            The agent profiles that recent_agents and recent_agent_profiles
+            reference, with how many agents were launched from each. Profiles
+            since deleted are omitted.
+          items:
+            $ref: '#/components/schemas/OrgOverviewAgentProfileReference'
+        today:
+          $ref: '#/components/schemas/OrgOverviewToday'
+        usage:
+          $ref: '#/components/schemas/OrgOverviewUsage'
+    OrgOverviewAgentProfileReference:
+      type: object
+      additionalProperties: false
+      required: [id, name, agent_count]
+      properties:
+        id:
+          $ref: '#/components/schemas/AgentProfileID'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        agent_count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Agents, not counting subagents, launched from the profile, including archived ones.
+    OrgOverviewToday:
+      type: object
+      additionalProperties: false
+      description: Activity since the start of today in `timezone`, across the readable projects in `projects`.
+      required: [agents_created, messages_sent]
+      properties:
+        agents_created:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Agents created today, not counting subagents.
+        messages_sent:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Messages sent to agents today, not counting messages to or from subagents.
+    OrgOverviewUsage:
+      type: object
+      additionalProperties: false
+      description: >-
+        Model usage over the last 30 days in `timezone`, today included, across the
+        readable projects in `projects`.
+      required: [totals, active_agents, models, profiles, days]
+      properties:
+        totals:
+          $ref: '#/components/schemas/UsageTotals'
+        active_agents:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Agents, not counting subagents, that made at least one model call.
+        models:
+          type: array
+          description: >-
+            The configured models with the most tokens, most first, up to eight.
+            Usage from any other model still counts toward every total.
+          items:
+            $ref: '#/components/schemas/OrgOverviewUsageModel'
+        profiles:
+          type: array
+          description: >-
+            The agent profiles with the most tokens, most first, up to eight. Usage
+            from a subagent counts toward the subagent's own profile.
+          items:
+            $ref: '#/components/schemas/OrgOverviewUsageProfile'
+        days:
+          type: array
+          description: One entry per day, oldest first and ending today, including days without usage.
+          items:
+            $ref: '#/components/schemas/OrgOverviewUsageDay'
+    OrgOverviewUsageModel:
+      type: object
+      additionalProperties: false
+      required: [id, name, totals]
+      properties:
+        id:
+          $ref: '#/components/schemas/ConfiguredModelID'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+          description: Configured model name, resolved even if the model has since been deleted.
+        totals:
+          $ref: '#/components/schemas/UsageTotals'
+    OrgOverviewUsageProfile:
+      type: object
+      additionalProperties: false
+      required: [totals]
+      properties:
+        id:
+          $ref: '#/components/schemas/AgentProfileID'
+          description: Omitted for usage from agents launched without a profile.
+        name:
+          $ref: '#/components/schemas/ResourceName'
+          description: >-
+            Agent profile name, resolved even if the profile has since been deleted.
+            Omitted along with `id`.
+        totals:
+          $ref: '#/components/schemas/UsageTotals'
+    OrgOverviewUsageDay:
+      type: object
+      additionalProperties: false
+      required: [start, totals, models, profiles]
+      properties:
+        start:
+          $ref: '#/components/schemas/Timestamp'
+          description: Start of the day in `timezone`.
+        totals:
+          $ref: '#/components/schemas/UsageTotals'
+          description: All usage in the day, including models and profiles missing from `models` and `profiles`.
+        models:
+          type: array
+          description: Tokens in the day for each model in `models` that has any, in `models` order.
+          items:
+            $ref: '#/components/schemas/OrgOverviewUsageDayModel'
+        profiles:
+          type: array
+          description: Tokens in the day for each profile in `profiles` that has any, in `profiles` order.
+          items:
+            $ref: '#/components/schemas/OrgOverviewUsageDayProfile'
+    OrgOverviewUsageDayModel:
+      type: object
+      additionalProperties: false
+      required: [id, tokens]
+      properties:
+        id:
+          $ref: '#/components/schemas/ConfiguredModelID'
+        tokens:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Input plus output tokens.
+    OrgOverviewUsageDayProfile:
+      type: object
+      additionalProperties: false
+      required: [tokens]
+      properties:
+        id:
+          $ref: '#/components/schemas/AgentProfileID'
+          description: Omitted for usage from agents launched without a profile.
+        tokens:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Input plus output tokens.
+    UsageTokenTotals:
+      type: object
+      additionalProperties: false
+      description: >-
+        Summed token counts across the tallied model calls. Input totals are the
+        sum of uncached, cache-read, and cache-write tokens; output totals
+        include reasoning tokens.
+      required: [input_tokens_total, uncached_input_tokens, cache_read_input_tokens, cache_write_input_tokens, output_tokens_total, reasoning_output_tokens]
+      properties:
+        input_tokens_total:
+          type: integer
+          format: int64
+          minimum: 0
+        uncached_input_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_read_input_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_write_input_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+        output_tokens_total:
+          type: integer
+          format: int64
+          minimum: 0
+        reasoning_output_tokens:
+          type: integer
+          format: int64
+          minimum: 0
+    UsageCostTotals:
+      type: object
+      additionalProperties: false
+      required: [provider_reported_usd, model_calls_with_reported_cost]
+      properties:
+        provider_reported_usd:
+          type: string
+          description: >-
+            Exact decimal sum in USD of the costs the provider reported for the
+            tallied model calls. Calls whose provider reported no cost contribute
+            nothing; compare model_calls_with_reported_cost against model_calls
+            to see how complete the figure is.
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+        model_calls_with_reported_cost:
+          type: integer
+          format: int64
+          minimum: 0
+    UsageTotals:
+      type: object
+      additionalProperties: false
+      required: [model_calls, tokens, cost]
+      properties:
+        model_calls:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Model calls that recorded token usage or a provider-reported cost.
+        tokens:
+          $ref: '#/components/schemas/UsageTokenTotals'
+        cost:
+          $ref: '#/components/schemas/UsageCostTotals'
+    UsageModel:
+      type: object
+      additionalProperties: false
+      required: [configured_model_id, name, provider_model_slug, model_provider_config_id, model_provider_config_name]
+      properties:
+        configured_model_id:
+          $ref: '#/components/schemas/ConfiguredModelID'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+          description: Configured model name, resolved even if the model has since been deleted.
+        provider_model_slug:
+          type: string
+        model_provider_config_id:
+          $ref: '#/components/schemas/ModelProviderConfigID'
+        model_provider_config_name:
+          $ref: '#/components/schemas/ResourceName'
+    ModelUsageTotals:
+      type: object
+      additionalProperties: false
+      required: [model, model_calls, tokens, cost]
+      properties:
+        model:
+          $ref: '#/components/schemas/UsageModel'
+        model_calls:
+          type: integer
+          format: int64
+          minimum: 0
+        tokens:
+          $ref: '#/components/schemas/UsageTokenTotals'
+        cost:
+          $ref: '#/components/schemas/UsageCostTotals'
+    UsageReport:
+      type: object
+      additionalProperties: false
+      required: [totals, by_model]
+      properties:
+        totals:
+          $ref: '#/components/schemas/UsageTotals'
+        by_model:
+          type: array
+          description: >-
+            Per-model rows ordered by provider config name, configured model name,
+            then provider model slug. Models with distinct provider slugs across
+            revisions appear once per slug.
+          items:
+            $ref: '#/components/schemas/ModelUsageTotals'
     CurrentUserIdentity:
       type: object
       additionalProperties: false

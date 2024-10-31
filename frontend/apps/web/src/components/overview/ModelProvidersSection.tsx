@@ -20,6 +20,7 @@ import {
   useListToolbarVisibility,
   useResourceList,
 } from '@/hooks/use-resource-list'
+import { guides } from '@/lib/docs'
 import { formatDateTime } from '@/lib/format'
 import { canManageOrg } from '@/lib/permissions'
 import { useActiveOrg } from '@/lib/use-active-org'
@@ -52,17 +53,15 @@ export function ModelProvidersSection() {
       <div className="flex flex-col gap-3">
         <SearchHeader
           title="Model providers"
+          guide={guides.modelProviders}
           toolbar={
-            showToolbar ? (
-              <ResourceListToolbar
-                search={list.search}
-                onSearchChange={list.setSearch}
-                sort={list.sort}
-                sortOptions={resourceSortOptions}
-                onSortChange={list.setSort}
-                placeholder="Search providers by name…"
-              />
-            ) : undefined
+            <ResourceListToolbar
+              search={list.search}
+              onSearchChange={list.setSearch}
+              sort={{ value: list.sort, options: resourceSortOptions, onChange: list.setSort }}
+              placeholder="Search providers by name…"
+              showSearch={showToolbar}
+            />
           }
         >
           {newProviderButton()}
@@ -136,6 +135,12 @@ export function ModelProvidersSection() {
                 { label: 'API variant', value: provider.api_variant },
                 { label: 'Endpoint path', value: provider.endpoint_path, mono: true },
                 { label: 'Auth', value: provider.auth_kind },
+                { label: 'Headers', value: formatHeaders(provider.headers), mono: true },
+                {
+                  label: 'Secret headers',
+                  value: formatHeaders(provider.secret_headers),
+                  mono: true,
+                },
                 { label: 'Total request timeout', value: `${provider.request_timeout_ms} ms` },
                 { label: 'Idle timeout', value: `${provider.idle_timeout_ms} ms` },
                 { label: 'Created', value: formatDateTime(provider.created_at) },
@@ -166,4 +171,11 @@ export function ModelProvidersSection() {
       )}
     </>
   )
+}
+
+function formatHeaders(headers: Record<string, string>) {
+  const lines = Object.entries(headers)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}: ${value}`)
+  return lines.length === 0 ? '' : <span className="whitespace-pre-wrap">{lines.join('\n')}</span>
 }

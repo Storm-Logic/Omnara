@@ -20,7 +20,6 @@ import (
 
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/mcp"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
@@ -185,10 +184,6 @@ func TestMCPConnectionRefreshesAndPersistsExpiredOAuthToken(t *testing.T) {
 	`, toolsTestOrgID, initialVersion.ID); err != nil {
 		t.Fatalf("expire MCP OAuth access token: %v", err)
 	}
-	secretPublicID, err := publicid.Encode(publicid.KindSecret, secret.ID)
-	if err != nil {
-		t.Fatalf("encode MCP OAuth secret ID: %v", err)
-	}
 	conn, found, err := fixture.Store.Execution().GetMCPConnection(ctx, toolsTestProjectID, fixture.Agent.ID, "docs")
 	if err != nil || !found {
 		t.Fatalf("load MCP connection: found=%t err=%v", found, err)
@@ -198,7 +193,7 @@ func TestMCPConnectionRefreshesAndPersistsExpiredOAuthToken(t *testing.T) {
 		URL:       conn.EndpointURL,
 		Auth: &agentconfig.RuntimeMCPAuth{
 			Type:     agentconfig.MCPAuthTypeOAuth,
-			SecretID: secretPublicID,
+			SecretID: secret.ID,
 		},
 	}
 	manager := mcp.Manager{
@@ -374,10 +369,6 @@ func TestSigV4MCPConnectionRechecksSecretGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grant AWS credentials secret: %v", err)
 	}
-	secretPublicID, err := publicid.Encode(publicid.KindSecret, secret.ID)
-	if err != nil {
-		t.Fatalf("encode AWS credentials secret ID: %v", err)
-	}
 	conn, found, err := fixture.Store.Execution().GetMCPConnection(ctx, toolsTestProjectID, fixture.Agent.ID, "docs")
 	if err != nil || !found {
 		t.Fatalf("load MCP connection: found=%t err=%v", found, err)
@@ -388,7 +379,7 @@ func TestSigV4MCPConnectionRechecksSecretGrant(t *testing.T) {
 		URL:       conn.EndpointURL,
 		Auth: &agentconfig.RuntimeMCPAuth{
 			Type:     agentconfig.MCPAuthTypeSigV4,
-			SecretID: secretPublicID,
+			SecretID: secret.ID,
 			Service:  "execute-api",
 			Region:   "us-west-2",
 		},
@@ -473,7 +464,7 @@ func TestMCPDispatchRunsAsynchronouslyUnderRuntimeOwnership(t *testing.T) {
 	toolCallID := fixture.toolCallID(t, ctx, call.ID)
 	var toolType string
 	var state string
-	var runtimeLockID storage.ID
+	var runtimeLockID uuid.UUID
 	if err := fixture.Pool.QueryRow(
 		ctx,
 		`
@@ -634,7 +625,7 @@ func TestMCPDispatchPersistsMediaAndStructuredContentInOrder(t *testing.T) {
 	if !ok {
 		t.Fatalf("MCP media result artifact id = %v", parts[1]["artifact_id"])
 	}
-	artifactID, err := storage.ParseID(rawArtifactID)
+	artifactID, err := uuid.Parse(rawArtifactID)
 	if err != nil {
 		t.Fatalf("parse MCP result artifact id: %v", err)
 	}
@@ -798,7 +789,7 @@ func assertIntegrationToolCallState(
 	t *testing.T,
 	ctx context.Context,
 	fixture integrationToolFixture,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 	want string,
 ) {
 	t.Helper()

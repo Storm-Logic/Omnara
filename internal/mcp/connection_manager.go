@@ -9,14 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/outboundhttp"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/sigv4"
 	"github.com/omnara-ai/omnara/internal/ssrf"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/secretstore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
@@ -99,7 +98,7 @@ const (
 
 func (m Manager) EnsureConnection(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 	trigger ConnectionTrigger,
@@ -129,7 +128,7 @@ func (m Manager) EnsureConnection(
 
 func (m Manager) refreshReadyOrMarkFailed(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (ConnectionResult, error) {
@@ -143,7 +142,7 @@ func (m Manager) refreshReadyOrMarkFailed(
 
 func (m Manager) initializePending(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (ConnectionResult, error) {
@@ -161,7 +160,7 @@ func (m Manager) initializePending(
 
 func (m Manager) refreshExpired(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (ConnectionResult, error) {
@@ -194,7 +193,7 @@ func (m Manager) refreshExpired(
 
 func (m Manager) initializeOrMarkFailed(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (ConnectionResult, error) {
@@ -207,7 +206,7 @@ func (m Manager) initializeOrMarkFailed(
 
 func (m Manager) markConnectionFailed(
 	ctx context.Context,
-	projectID, agentID storage.ID,
+	projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	cause error,
 ) (ConnectionResult, error) {
@@ -239,7 +238,7 @@ func sanitizeInitializationError(value string) string {
 
 func (m Manager) initializeWithRetry(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (executionstore.MCPConnectionRecord, error) {
@@ -274,7 +273,7 @@ func (m Manager) initializeWithRetry(
 
 func (m Manager) readyConnectionByID(
 	ctx context.Context,
-	projectID, agentID, id storage.ID,
+	projectID, agentID, id uuid.UUID,
 ) (executionstore.MCPConnectionRecord, error) {
 	conn, found, err := m.Execution.GetMCPConnectionByID(ctx, projectID, agentID, id)
 	if err != nil {
@@ -316,7 +315,7 @@ func ClarifyTransportError(cause error, endpointURL string) error {
 
 func (m Manager) initialize(
 	ctx context.Context,
-	orgID, projectID, agentID storage.ID,
+	orgID, projectID, agentID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 ) (executionstore.MCPConnectionRecord, error) {
@@ -366,7 +365,7 @@ func validateDiscoveredTools(server agentconfig.RuntimeMCPServer, tools []*sdkmc
 
 func (m Manager) Connection(
 	ctx context.Context,
-	orgID, projectID storage.ID,
+	orgID, projectID uuid.UUID,
 	conn executionstore.MCPConnectionRecord,
 	server agentconfig.RuntimeMCPServer,
 	sessionID, protocolVersion string,
@@ -383,7 +382,7 @@ func (m Manager) Connection(
 
 func (m Manager) connection(
 	ctx context.Context,
-	orgID, projectID storage.ID,
+	orgID, projectID uuid.UUID,
 	serverKey, endpointURL string,
 	auth *agentconfig.RuntimeMCPAuth,
 	sessionID, protocolVersion string,
@@ -393,10 +392,7 @@ func (m Manager) connection(
 	if auth == nil {
 		return wireConn, identity, nil
 	}
-	secretID, err := publicid.Decode(publicid.KindSecret, auth.SecretID)
-	if err != nil {
-		return Conn{}, identity, fmt.Errorf("decode mcp auth secret id for %q: %w", serverKey, err)
-	}
+	secretID := auth.SecretID
 	kind, err := mcpAuthSecretKind(auth.Type)
 	if err != nil {
 		return Conn{}, identity, fmt.Errorf("resolve mcp auth secret kind for %q: %w", serverKey, err)
@@ -470,12 +466,12 @@ const (
 func (m Manager) oauthBearerToken(
 	ctx context.Context,
 	serverKey string,
-	orgID, projectID, secretID storage.ID,
+	orgID, projectID, secretID uuid.UUID,
 	secretPayload secretstore.SecretPayloadRecord,
-) (string, storage.ID, error) {
+) (string, uuid.UUID, error) {
 	token, fresh, err := m.oauthAccessToken(serverKey, secretPayload)
 	if err != nil {
-		return "", storage.NilID, err
+		return "", uuid.Nil, err
 	}
 	if fresh {
 		return token, secretPayload.CurrentVersionID, nil
@@ -486,8 +482,8 @@ func (m Manager) oauthBearerToken(
 func (m Manager) refreshOAuthBearerTokenWithLease(
 	ctx context.Context,
 	serverKey string,
-	orgID, projectID, secretID storage.ID,
-) (string, storage.ID, error) {
+	orgID, projectID, secretID uuid.UUID,
+) (string, uuid.UUID, error) {
 	maxWaits := m.OAuthRefreshMaxWaits
 	if maxWaits <= 0 {
 		maxWaits = defaultOAuthRefreshMaxWaits
@@ -508,7 +504,7 @@ func (m Manager) refreshOAuthBearerTokenWithLease(
 			},
 		)
 		if err != nil {
-			return "", storage.NilID, fmt.Errorf("acquire mcp oauth refresh lease for %q: %w", serverKey, err)
+			return "", uuid.Nil, fmt.Errorf("acquire mcp oauth refresh lease for %q: %w", serverKey, err)
 		}
 		if acquired {
 			ownerTimeout := leaseTTL - time.Since(leaseAttemptStarted) - oauthRefreshOwnerHeadroom
@@ -521,14 +517,14 @@ func (m Manager) refreshOAuthBearerTokenWithLease(
 			)
 		}
 		if attempt >= maxWaits {
-			return "", storage.NilID, fmt.Errorf("mcp oauth refresh lease for %q is busy", serverKey)
+			return "", uuid.Nil, fmt.Errorf("mcp oauth refresh lease for %q is busy", serverKey)
 		}
 		wait := min(defaultOAuthRefreshWait*time.Duration(attempt+1), maxDefaultOAuthRefreshWait)
 		if m.OAuthRefreshWait != nil {
 			wait = m.OAuthRefreshWait(attempt)
 		}
 		if err := sleepBackoff(ctx, wait); err != nil {
-			return "", storage.NilID, err
+			return "", uuid.Nil, err
 		}
 		secretPayload, err := m.Secrets.ReadProjectAvailableSecretPayload(
 			ctx,
@@ -540,11 +536,11 @@ func (m Manager) refreshOAuthBearerTokenWithLease(
 			},
 		)
 		if err != nil {
-			return "", storage.NilID, fmt.Errorf("read mcp auth secret for %q after refresh wait: %w", serverKey, err)
+			return "", uuid.Nil, fmt.Errorf("read mcp auth secret for %q after refresh wait: %w", serverKey, err)
 		}
 		token, fresh, err := m.oauthAccessToken(serverKey, secretPayload)
 		if err != nil {
-			return "", storage.NilID, err
+			return "", uuid.Nil, err
 		}
 		if fresh {
 			return token, secretPayload.CurrentVersionID, nil
@@ -555,16 +551,16 @@ func (m Manager) refreshOAuthBearerTokenWithLease(
 func (m Manager) refreshOAuthBearerTokenAsLeaseOwner(
 	callerCtx context.Context,
 	serverKey string,
-	projectID storage.ID,
+	projectID uuid.UUID,
 	lease secretstore.OAuthRefreshLeaseRecord,
 	timeout time.Duration,
-) (string, storage.ID, error) {
+) (string, uuid.UUID, error) {
 	defer func() { _ = m.Secrets.ReleaseProjectOAuthRefreshLease(context.WithoutCancel(callerCtx), lease) }()
 	if timeout <= 0 {
-		return "", storage.NilID, fmt.Errorf("mcp oauth refresh lease for %q has insufficient remaining time", serverKey)
+		return "", uuid.Nil, fmt.Errorf("mcp oauth refresh lease for %q has insufficient remaining time", serverKey)
 	}
 	if err := callerCtx.Err(); err != nil {
-		return "", storage.NilID, err
+		return "", uuid.Nil, err
 	}
 	leaseOwnerCtx, cancel := context.WithTimeout(context.WithoutCancel(callerCtx), timeout)
 	defer cancel()
@@ -578,21 +574,21 @@ func (m Manager) refreshOAuthBearerTokenAsLeaseOwner(
 		},
 	)
 	if err != nil {
-		return "", storage.NilID, fmt.Errorf("read mcp auth secret for %q as refresh lease owner: %w", serverKey, err)
+		return "", uuid.Nil, fmt.Errorf("read mcp auth secret for %q as refresh lease owner: %w", serverKey, err)
 	}
 	payload := secretPayload.Payload
 	token, fresh, err := m.oauthAccessToken(serverKey, secretPayload)
 	if err != nil {
-		return "", storage.NilID, err
+		return "", uuid.Nil, err
 	}
 	if fresh {
 		return token, secretPayload.CurrentVersionID, nil
 	}
 	if secretPayload.CurrentVersionID != lease.ExpectedCurrentVersionID {
-		return "", storage.NilID, fmt.Errorf("mcp oauth refresh lease for %q no longer owns the current secret version", serverKey)
+		return "", uuid.Nil, fmt.Errorf("mcp oauth refresh lease for %q no longer owns the current secret version", serverKey)
 	}
 	if payload[secrets.KeyRefreshToken] == "" {
-		return "", storage.NilID, fmt.Errorf("mcp oauth secret for %q is expired and has no refresh token", serverKey)
+		return "", uuid.Nil, fmt.Errorf("mcp oauth secret for %q is expired and has no refresh token", serverKey)
 	}
 	refreshed, err := RefreshOAuthToken(leaseOwnerCtx, OAuthRefreshInput{
 		TokenEndpoint: payload[secrets.KeyTokenEndpoint],
@@ -603,7 +599,7 @@ func (m Manager) refreshOAuthBearerTokenAsLeaseOwner(
 		HTTPClient:    m.OAuthHTTPClient,
 	})
 	if err != nil {
-		return "", storage.NilID, fmt.Errorf("refresh mcp oauth token for %q: %w", serverKey, err)
+		return "", uuid.Nil, fmt.Errorf("refresh mcp oauth token for %q: %w", serverKey, err)
 	}
 	refreshedPayload := maps.Clone(payload)
 	refreshedPayload[secrets.KeyAccessToken] = refreshed.AccessToken
@@ -622,7 +618,7 @@ func (m Manager) refreshOAuthBearerTokenAsLeaseOwner(
 		refreshed.AccessTokenLifetime(),
 	)
 	if err != nil {
-		return "", storage.NilID, fmt.Errorf("normalize refreshed mcp oauth token for %q: %w", serverKey, err)
+		return "", uuid.Nil, fmt.Errorf("normalize refreshed mcp oauth token for %q: %w", serverKey, err)
 	}
 	rotated, err := m.Secrets.RotateProjectAvailableOAuthSecret(
 		leaseOwnerCtx,
@@ -650,7 +646,7 @@ func (m Manager) refreshOAuthBearerTokenAsLeaseOwner(
 				}
 			}
 		}
-		return "", storage.NilID, fmt.Errorf("store refreshed mcp oauth token for %q: %w", serverKey, err)
+		return "", uuid.Nil, fmt.Errorf("store refreshed mcp oauth token for %q: %w", serverKey, err)
 	}
 	return refreshed.AccessToken, rotated.CurrentVersionID, nil
 }

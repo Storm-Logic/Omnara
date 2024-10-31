@@ -6,15 +6,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnara-ai/omnara/internal/interactionform"
 	"github.com/omnara-ai/omnara/internal/model"
+	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
+	"github.com/omnara-ai/omnara/internal/storage/modelstore"
 	"github.com/omnara-ai/omnara/internal/toolpermission"
+	"github.com/stretchr/testify/require"
 )
 
 type backgroundRunnerFunc func(string, func(context.Context) error) bool
@@ -74,6 +79,36 @@ func TestTransactionalToolDispatchUsesOneDatabaseConnection(t *testing.T) {
 	}
 }
 
+func TestListMachinesDispatchRejectsInvalidCursor(t *testing.T) {
+	ctx := t.Context()
+	fixture := newIntegrationToolFixture(t, ctx, "invalid-machine-cursor")
+	call := fixture.recordToolCall(
+		t, ctx, "call_invalid_machine_cursor", "list_machines",
+		`{"cursor":"mch_aaaaaaaaaaaaaaaaaaaaaaaaaa"}`, fixture.Now.Add(20*time.Second),
+	)
+	turn := fixture.turn()
+	turn.Tools["list_machines"] = ToolSpec{
+		Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAllow),
+	}
+	result, err := (Executor{Store: fixture.Store}).Dispatch(ctx, turn, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Disposition != DispatchCompleted ||
+		!strings.Contains(string(result.ContentParts), `"error_code":"malformed"`) {
+		t.Fatalf("invalid cursor result = %+v, want completed malformed-input result", result)
+	}
+	record, err := fixture.Store.Execution().GetToolCall(
+		ctx, toolsTestProjectID, fixture.Agent.ID, fixture.toolCallID(t, ctx, call.ID),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != executionstore.ToolCallStateCompleted || record.Outcome != executionstore.ToolResultOutcomeFailed {
+		t.Fatalf("invalid cursor tool call = %+v, want completed failure", record)
+	}
+}
+
 func TestSpawnAgentDispatchUsesOneDatabaseConnection(t *testing.T) {
 	ctx := context.Background()
 	fixture := newIntegrationToolFixtureWithOptions(
@@ -122,6 +157,45 @@ func TestSpawnAgentDispatchUsesOneDatabaseConnection(t *testing.T) {
 	}
 }
 
+func TestSpawnAgentDispatchReturnsUnsupportedModelToolFailure(t *testing.T) {
+	ctx := t.Context()
+	fixture := newIntegrationToolFixtureWithOptions(
+		t, ctx, "unsupported-subagent-model", toolFixtureOptions{withSubagents: true},
+	)
+	configuredModel, err := fixture.Store.Models().GetConfiguredModel(
+		ctx, toolsTestOrgID, fixture.AgentConfig.ConfiguredModelID,
+	)
+	require.NoError(t, err)
+	_, err = fixture.Store.Models().PatchConfiguredModel(ctx, modelstore.PatchConfiguredModelInput{
+		OrgID: toolsTestOrgID, ModelProviderConfigID: configuredModel.ModelProviderConfigID,
+		ID: configuredModel.ID, SupportsTools: new(false),
+	})
+	require.NoError(t, err)
+	call := fixture.recordToolCall(t, ctx, "call_unsupported_subagent_model", "spawn_agent",
+		`{"agent":"fork","task":"Investigate the failing build."}`, fixture.Now.Add(20*time.Second))
+	turn := fixture.turn()
+	turn.Tools["spawn_agent"] = ToolSpec{
+		Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAllow),
+	}
+	result, err := (Executor{
+		Store: fixture.Store,
+		Now:   func() time.Time { return fixture.Now.Add(21 * time.Second) },
+	}).Dispatch(ctx, turn, call)
+	require.NoError(t, err)
+	require.Equal(t, DispatchCompleted, result.Disposition)
+	require.Contains(t, string(result.ContentParts), `"error_code":"spawn_agent_failed"`)
+	require.Contains(t, string(result.ContentParts), "does not support tools")
+	record, err := fixture.Store.Execution().GetToolCall(
+		ctx, toolsTestProjectID, fixture.Agent.ID, fixture.toolCallID(t, ctx, call.ID),
+	)
+	require.NoError(t, err)
+	require.Equal(t, executionstore.ToolCallStateCompleted, record.State)
+	require.Equal(t, executionstore.ToolResultOutcomeFailed, record.Outcome)
+	children, err := fixture.Store.Execution().ListSubagents(ctx, toolsTestProjectID, fixture.Agent.ID)
+	require.NoError(t, err)
+	require.Empty(t, children)
+}
+
 func TestStopProcessDispatchPreservesTerminalResults(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -160,14 +234,14 @@ func TestStopProcessDispatchPreservesTerminalResults(t *testing.T) {
 				"stop-"+test.processState,
 				fixture.Now.Add(10*time.Second),
 			)
-			var agentMachineBindingID storage.ID
+			var agentMachineBindingID uuid.UUID
 			if err := fixture.Pool.QueryRow(
 				ctx,
 				`INSERT INTO agent_machine_bindings(
-				   org_id, project_id, agent_id, machine_id, machine_ref,
+				   org_id, project_id, agent_id, machine_id,
 				   binding_kind, state, created_at, updated_at
 				 )
-				 VALUES ($1, $2, $3, $4, 'mchr-stp001', 'explicit', 'attached', $5, $5)
+				 VALUES ($1, $2, $3, $4, 'explicit', 'attached', $5, $5)
 				 RETURNING id`,
 				toolsTestOrgID,
 				toolsTestProjectID,
@@ -457,7 +531,7 @@ func TestToolHandlerPhaseOrdering(t *testing.T) {
 				if !released {
 					return errors.New("background started before durable handoff committed")
 				}
-				if call.Turn.RuntimeLockID == storage.NilID {
+				if call.Turn.RuntimeLockID == uuid.Nil {
 					return errors.New("background lost dispatch context")
 				}
 				close(backgroundStarted)
@@ -1091,7 +1165,7 @@ func dispatchTestAsyncHandler(
 	executor Executor,
 	turn Turn,
 	call model.ToolCall,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 	handler toolHandler,
 ) {
 	t.Helper()
@@ -1220,5 +1294,122 @@ func assertDispatchTestResultCount(
 	}
 	if count != want {
 		t.Fatalf("dispatch test results = %d, want %d", count, want)
+	}
+}
+
+func TestFileToolsApprovalDispatch(t *testing.T) {
+	for _, name := range []string{"upload_file", "download_file"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newIntegrationToolFixture(t, ctx, "file-approval-"+name)
+			machine := createExecutableBinding(t, ctx, fixture.Store, fixture.User.ID, name, fixture.Now.Add(time.Second))
+			var bindingID uuid.UUID
+			err := fixture.Pool.QueryRow(ctx, `
+				INSERT INTO agent_machine_bindings(
+					org_id, project_id, agent_id, machine_id, machine_ref, binding_kind, state, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, 'mchr-file01', 'explicit', 'attached', $5, $5)
+				RETURNING id`,
+				toolsTestOrgID, toolsTestProjectID, fixture.Agent.ID, machine.MachineID, fixture.Now,
+			).Scan(&bindingID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifactID, err := publicid.Encode(publicid.KindArtifact, uuid.New())
+			if err != nil {
+				t.Fatal(err)
+			}
+			machineID, err := publicid.Encode(publicid.KindMachine, machine.MachineID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := `{"path":"/artifacts","source":"report.pdf","machine_id":"` + machineID + `"}`
+			if name == "download_file" {
+				input = `{"path":"/artifacts/` + artifactID + `","destination":"report.pdf","machine_id":"` + machineID + `"}`
+			}
+			call := fixture.recordPendingToolCall(t, ctx, "call_file", name, input, fixture.Now.Add(20*time.Second))
+			turn := fixture.turn()
+			turn.Tools = map[string]ToolSpec{name: {Permission: toolpermission.DefaultSelection(toolpermission.ModeAlwaysAsk)}}
+			wakes := 0
+			executor := Executor{
+				Store:            fixture.Store,
+				Now:              func() time.Time { return fixture.Now.Add(21 * time.Second) },
+				BackgroundRunner: backgroundRunnerFunc(func(string, func(context.Context) error) bool { wakes++; return true }),
+			}
+			if err := executor.PrepareToolCallPermission(ctx, turn, call); err != nil {
+				t.Fatal(err)
+			}
+			callID := fixture.toolCallID(t, ctx, call.ID)
+			if _, found, err := fixture.Store.Execution().GetProcessByToolCall(
+				ctx, toolsTestProjectID, fixture.Agent.ID, callID,
+			); err != nil || found {
+				t.Fatalf("process existed before approval: found=%v err=%v", found, err)
+			}
+			interaction := integrationToolInteraction(t, ctx, fixture, callID, "permission")
+			request, err := toolpermission.ParseRequest(interaction.Request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAuth, err := uploadArtifactAuthorizationInput(bindingID, "report.pdf")
+			if name == "download_file" {
+				wantAuth, err = downloadArtifactAuthorizationInput(bindingID, artifactID, "report.pdf")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(request.Authorization.Input) != string(wantAuth) {
+				t.Fatalf("authorization = %s, want %s", request.Authorization.Input, wantAuth)
+			}
+			approveToolPermissionForTest(t, ctx, fixture.Store.Execution(), interaction, fixture.User.ID)
+			wakes = 0
+			result, err := executor.Dispatch(ctx, turn, call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Disposition != DispatchDeferred || wakes != 1 {
+				t.Fatalf("dispatch=%+v wakes=%d", result, wakes)
+			}
+			process, found, err := fixture.Store.Execution().GetProcessByToolCall(
+				ctx, toolsTestProjectID, fixture.Agent.ID, callID,
+			)
+			if err != nil || !found {
+				t.Fatalf("load process found=%v err=%v", found, err)
+			}
+			publicCallID, err := publicid.Encode(publicid.KindToolCall, callID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := uploadArtifactProcessInput(publicCallID, "report.pdf")
+			if name == "download_file" {
+				want = downloadArtifactProcessInput(publicCallID, artifactID, "report.pdf")
+			}
+			if process.AgentMachineBindingID != bindingID || process.Command != want.Command ||
+				process.TimeoutSeconds != want.TimeoutSeconds {
+				t.Fatalf("process=%+v want=%+v", process, want)
+			}
+			record, err := fixture.Store.Execution().GetToolCall(ctx, toolsTestProjectID, fixture.Agent.ID, callID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(record.Input) == "" || !strings.Contains(string(record.Input), "/artifacts") {
+				t.Fatalf("lost VFS input: %s", record.Input)
+			}
+		})
+	}
+}
+
+func TestRemovedArtifactToolsFailDispatch(t *testing.T) {
+	for _, name := range []string{"upload_artifact", "download_artifact"} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newIntegrationToolFixture(t, ctx, "removed-"+name)
+			call := fixture.recordToolCall(t, ctx, "call_removed", name, `{}`, fixture.Now.Add(20*time.Second))
+			result, err := (Executor{Store: fixture.Store}).Dispatch(ctx, fixture.turn(), call)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Disposition != DispatchCompleted || !strings.Contains(string(result.ContentParts), "unsupported") {
+				t.Fatalf("removed tool result=%+v", result)
+			}
+		})
 	}
 }

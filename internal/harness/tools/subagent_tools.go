@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/agentconfigcompile"
 	"github.com/omnara-ai/omnara/internal/httpapi/publicevents"
 	"github.com/omnara-ai/omnara/internal/machinepool"
 	"github.com/omnara-ai/omnara/internal/publicid"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/storeerr"
@@ -161,6 +161,7 @@ func validateListAgentsInput(raw json.RawMessage) error {
 
 func subagentStorageErrorIsToolFailure(cause error) bool {
 	return errors.Is(cause, storeerr.ErrInvalidRequest) ||
+		errors.Is(cause, storeerr.ErrInvalidModelProviderConfig) ||
 		errors.Is(cause, storeerr.ErrNotFound) ||
 		errors.Is(cause, storeerr.ErrConflict) ||
 		errors.Is(cause, storeerr.ErrStateTransitionConflict)
@@ -311,7 +312,7 @@ func provisionSubagentMachinesInBackground(ctx context.Context, call backgroundT
 }
 
 type subagentLaunchConfig struct {
-	profileID storage.ID
+	profileID uuid.UUID
 	derived   executionstore.CreateAgentConfigInput
 }
 
@@ -330,20 +331,16 @@ func subagentLaunchConfigForSpawn(
 	depth agentconfig.SubagentDepth,
 ) (subagentLaunchConfig, error) {
 	var baseConfig executionstore.AgentConfigRecord
-	var profileID storage.ID
+	var profileID uuid.UUID
 	switch subagent.Type {
 	case agentconfig.SubagentTypeSelf:
 		profileID = parent.AgentProfileID
 		baseConfig = parentConfig
 	case agentconfig.SubagentTypeProfile:
-		configuredProfileID, err := publicid.Decode(publicid.KindAgentProfile, subagent.ProfileID)
-		if err != nil {
-			return subagentLaunchConfig{}, fmt.Errorf("decode subagent profile id: %w", err)
-		}
-		profile, err := reader.GetAgentProfile(ctx, configuredProfileID)
+		profile, err := reader.GetAgentProfile(ctx, subagent.ProfileID)
 		if err != nil {
 			if storeerr.IsNotFound(err) {
-				return subagentLaunchConfig{}, fmt.Errorf("subagent profile %s no longer exists", subagent.ProfileID)
+				return subagentLaunchConfig{}, errors.New("configured subagent profile no longer exists")
 			}
 			return subagentLaunchConfig{}, err
 		}
@@ -356,7 +353,6 @@ func subagentLaunchConfigForSpawn(
 		baseConfig,
 		subagent,
 		depth,
-		agentconfigcompile.SubagentModelResolver(ctx, reader.Models(), parent.OrgID, parent.ProjectID),
 	)
 	if err != nil {
 		return subagentLaunchConfig{}, fmt.Errorf("derive subagent config: %w", err)

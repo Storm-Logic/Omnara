@@ -1,19 +1,21 @@
 package executionstore
 
-import "github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
+import (
+	"github.com/google/uuid"
+	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
+	"github.com/omnara-ai/omnara/internal/storage/internal/storeutil"
+)
 
 func agentConfigRecordFromSQLC(row dbsqlc.AgentConfig) AgentConfigRecord {
 	return AgentConfigRecord{
 		ID:                      row.ID,
 		OrgID:                   row.OrgID,
 		ProjectID:               row.ProjectID,
-		Definition:              row.Definition,
-		Source:                  row.Source,
-		SourceFormat:            row.SourceFormat,
-		SourceHash:              row.SourceHash,
+		Source:                  storeutil.TextOrEmpty(row.Source),
+		SourceFormat:            storeutil.TextOrEmpty(row.SourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.SourceHash),
 		ConfiguredModelID:       row.ConfiguredModelID,
 		CompiledDefinition:      row.CompiledDefinition,
-		CompilerVersion:         row.CompilerVersion,
 		EffectiveDefinitionHash: row.EffectiveDefinitionHash,
 		CreatedAt:               row.CreatedAt,
 	}
@@ -24,13 +26,11 @@ func agentConfigRecordFromUpsertSQLC(row dbsqlc.UpsertAgentConfigByHashRow) Agen
 		ID:                      row.ID,
 		OrgID:                   row.OrgID,
 		ProjectID:               row.ProjectID,
-		Definition:              row.Definition,
-		Source:                  row.Source,
-		SourceFormat:            row.SourceFormat,
-		SourceHash:              row.SourceHash,
+		Source:                  storeutil.TextOrEmpty(row.Source),
+		SourceFormat:            storeutil.TextOrEmpty(row.SourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.SourceHash),
 		ConfiguredModelID:       row.ConfiguredModelID,
 		CompiledDefinition:      row.CompiledDefinition,
-		CompilerVersion:         row.CompilerVersion,
 		EffectiveDefinitionHash: row.EffectiveDefinitionHash,
 		CreatedAt:               row.CreatedAt,
 	}
@@ -43,13 +43,11 @@ func agentConfigSnapshotFromSQLC(
 		ID:                      row.ID,
 		OrgID:                   row.OrgID,
 		ProjectID:               row.ProjectID,
-		Definition:              row.Definition,
-		Source:                  row.Source,
-		SourceFormat:            row.SourceFormat,
-		SourceHash:              row.SourceHash,
+		Source:                  storeutil.TextOrEmpty(row.Source),
+		SourceFormat:            storeutil.TextOrEmpty(row.SourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.SourceHash),
 		ConfiguredModelID:       row.ConfiguredModelID,
 		CompiledDefinition:      row.CompiledDefinition,
-		CompilerVersion:         row.CompilerVersion,
 		EffectiveDefinitionHash: row.EffectiveDefinitionHash,
 		CreatedAt:               row.CreatedAt,
 	}
@@ -66,13 +64,11 @@ func agentConfigSnapshotAtWatermarkFromSQLC(
 		ID:                      row.ID,
 		OrgID:                   row.OrgID,
 		ProjectID:               row.ProjectID,
-		Definition:              row.Definition,
-		Source:                  row.Source,
-		SourceFormat:            row.SourceFormat,
-		SourceHash:              row.SourceHash,
+		Source:                  storeutil.TextOrEmpty(row.Source),
+		SourceFormat:            storeutil.TextOrEmpty(row.SourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.SourceHash),
 		ConfiguredModelID:       row.ConfiguredModelID,
 		CompiledDefinition:      row.CompiledDefinition,
-		CompilerVersion:         row.CompilerVersion,
 		EffectiveDefinitionHash: row.EffectiveDefinitionHash,
 		CreatedAt:               row.CreatedAt,
 	}
@@ -82,7 +78,7 @@ func agentConfigSnapshotAtWatermarkFromSQLC(
 	}
 }
 
-func agentProfileRecordFromInsertSQLC(row dbsqlc.InsertAgentProfileRow, orgID ID) AgentProfileRecord {
+func agentProfileRecordFromInsertSQLC(row dbsqlc.InsertAgentProfileRow, orgID uuid.UUID) AgentProfileRecord {
 	return AgentProfileRecord{
 		ID:                row.ID,
 		OrgID:             orgID,
@@ -127,11 +123,10 @@ func agentProfileRecordFromListForProjectSQLC(row dbsqlc.ListAgentProfilesForPro
 		OrgID:                   row.ConfigOrgID,
 		ProjectID:               row.ConfigProjectID,
 		ConfiguredModelID:       row.ConfigConfiguredModelID,
-		Source:                  row.ConfigSource,
-		SourceFormat:            row.ConfigSourceFormat,
-		SourceHash:              row.ConfigSourceHash,
+		Source:                  storeutil.TextOrEmpty(row.ConfigSource),
+		SourceFormat:            storeutil.TextOrEmpty(row.ConfigSourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.ConfigSourceHash),
 		CompiledDefinition:      row.ConfigCompiledDefinition,
-		CompilerVersion:         row.ConfigCompilerVersion,
 		EffectiveDefinitionHash: row.ConfigEffectiveDefinitionHash,
 		CreatedAt:               row.ConfigCreatedAt,
 	}
@@ -157,11 +152,10 @@ func agentProfileRecordFromListRecentForProjectsSQLC(
 		OrgID:                   row.ConfigOrgID,
 		ProjectID:               row.ConfigProjectID,
 		ConfiguredModelID:       row.ConfigConfiguredModelID,
-		Source:                  row.ConfigSource,
-		SourceFormat:            row.ConfigSourceFormat,
-		SourceHash:              row.ConfigSourceHash,
+		Source:                  storeutil.TextOrEmpty(row.ConfigSource),
+		SourceFormat:            storeutil.TextOrEmpty(row.ConfigSourceFormat),
+		SourceHash:              storeutil.TextOrEmpty(row.ConfigSourceHash),
 		CompiledDefinition:      row.ConfigCompiledDefinition,
-		CompilerVersion:         row.ConfigCompilerVersion,
 		EffectiveDefinitionHash: row.ConfigEffectiveDefinitionHash,
 		CreatedAt:               row.ConfigCreatedAt,
 	}
@@ -186,7 +180,7 @@ func agentProfileRecordFromGetByIdempotencySQLC(
 
 func agentProfileRecordFromRetargetSQLC(
 	row dbsqlc.RetargetAgentProfileRow,
-	orgID ID,
+	orgID uuid.UUID,
 ) AgentProfileRecord {
 	return AgentProfileRecord{
 		ID:                row.ID,

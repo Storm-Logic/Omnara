@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/httpapi/apierror"
 	"github.com/omnara-ai/omnara/internal/httpapi/openapi"
 	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/resourcemeta"
 	"github.com/omnara-ai/omnara/internal/resourcename"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 )
@@ -28,7 +28,7 @@ func (s *Server) machinePoolResponse(record executionstore.MachinePoolRecord) (o
 		return openapi.MachinePool{}, err
 	}
 	var defaultMachineSecretEnv map[string]openapi.SecretID
-	if err := json.Unmarshal(record.DefaultMachineSecretEnv, &defaultMachineSecretEnv); err != nil {
+	if err := publicSecretIDs(record.DefaultMachineSecretEnv, &defaultMachineSecretEnv); err != nil {
 		return openapi.MachinePool{}, err
 	}
 	defaultMachineProviderOptions, err := jsonMapOrFallback(record.DefaultMachineProviderOptions, json.RawMessage(`{}`))
@@ -70,7 +70,7 @@ func (s *Server) machinePoolResponse(record executionstore.MachinePoolRecord) (o
 		CreatedAt:                     record.CreatedAt,
 		UpdatedAt:                     record.UpdatedAt,
 	}
-	if record.ProviderAuthSecretID != storage.NilID {
+	if record.ProviderAuthSecretID != uuid.Nil {
 		secretID, err := publicID(publicid.KindSecret, record.ProviderAuthSecretID)
 		if err != nil {
 			return openapi.MachinePool{}, err
@@ -178,7 +178,7 @@ func (s strictOpenAPIServer) createMachinePool(
 	if err != nil {
 		return nil, err
 	}
-	defaultMachineSecretEnv, err := rawJSONFromPointer(request.Body.DefaultMachineSecretEnv)
+	defaultMachineSecretEnv, err := secretIDsFromPointer(request.Body.DefaultMachineSecretEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +299,7 @@ func (s strictOpenAPIServer) updateMachinePool(
 	if err != nil {
 		return nil, err
 	}
-	defaultMachineSecretEnv, err := rawJSONFromPointer(request.Body.DefaultMachineSecretEnv)
+	defaultMachineSecretEnv, err := secretIDsFromPointer(request.Body.DefaultMachineSecretEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (s strictOpenAPIServer) updateMachinePool(
 		return nil, err
 	}
 	metadata := request.Body.Metadata
-	var providerAuthSecretID *storage.ID
+	var providerAuthSecretID *uuid.UUID
 	if request.Body.ProviderAuthSecretId != nil {
 		parsed, ok := parseOpenAPIPublicID(publicid.KindSecret, *request.Body.ProviderAuthSecretId)
 		if !ok {

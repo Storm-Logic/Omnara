@@ -21,13 +21,13 @@ import (
 	"github.com/omnara-ai/omnara/internal/authn"
 	"github.com/omnara-ai/omnara/internal/bearertoken"
 	"github.com/omnara-ai/omnara/internal/modelprotocol"
-	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/resourcemeta"
 	"github.com/omnara-ai/omnara/internal/resourcename"
 	"github.com/omnara-ai/omnara/internal/secrets"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/internal/dbsqlc"
+	"github.com/omnara-ai/omnara/internal/storage/internal/storeutil"
 	"github.com/omnara-ai/omnara/internal/storage/listing"
 	"github.com/omnara-ai/omnara/internal/storage/management"
 	"github.com/omnara-ai/omnara/internal/storage/modelstore"
@@ -122,7 +122,7 @@ func TestCanonicalBearerCredentialsPersistOnlyFullTokenDigests(t *testing.T) {
 		}
 	}
 
-	assertStoredToken := func(table string, id ID, token, recordTokenID string) {
+	assertStoredToken := func(table string, id uuid.UUID, token, recordTokenID string) {
 		t.Helper()
 		var tokenHash string
 		if recordTokenID == "" {
@@ -272,7 +272,7 @@ func TestProjectAuthorizationAndPersonalAccessTokens(t *testing.T) {
 	}
 	if principal.Type != identitystore.PrincipalTypeUser || principal.ID != developer.ID ||
 		principal.PersonalAccessTokenID != developerToken.Record.ID ||
-		principal.OrgID != NilID {
+		principal.OrgID != uuid.Nil {
 		t.Fatalf("unexpected principal: %+v", principal)
 	}
 	if _, err := store.Identity().AuthenticatePersonalAccessToken(
@@ -534,7 +534,7 @@ func TestCreateOrgForUserRejectsDefaultPoolSecretEnv(t *testing.T) {
 	pool := openIntegrationDB(t, ctx)
 	store := newIntegrationStore(pool, WithMachinePoolProviders(mergingMachinePoolProviders{}))
 	user := mustCreateIdentityUser(t, ctx, store, "default-pool-secret@example.com", "Cluster Pool Secret")
-	missingSecretID := secretPublicIDForTest(t, testID("default-pool-missing-secret"))
+	missingSecretID := testID("default-pool-missing-secret").String()
 	_, err := store.Organizations().CreateOrgForUser(
 		ctx,
 		orglifecycle.CreateOrgForUserInput{
@@ -725,7 +725,7 @@ func assertClusterPoolCaps(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	orgID ID,
+	orgID uuid.UUID,
 	wantMachines, wantMemoryMB int32,
 ) {
 	t.Helper()
@@ -838,10 +838,6 @@ func TestDefaultModelProviderProvisioningCreatesClusterManagedResourcesAtomicall
 	); !errors.Is(err, storeerr.ErrNotFound) {
 		t.Fatalf("tenant machine pool with cluster credential error = %v, want not found", err)
 	}
-	credentialPublicID, err := publicid.Encode(publicid.KindSecret, credential.ID)
-	if err != nil {
-		t.Fatalf("encode cluster credential id: %v", err)
-	}
 	tenantCredential, _, err := store.Secrets().CreateSecret(ctx, secretstore.CreateSecretInput{
 		OrgID:     created.Org.ID,
 		OwnerKind: secretstore.SecretOwnerOrg,
@@ -859,11 +855,21 @@ func TestDefaultModelProviderProvisioningCreatesClusterManagedResourcesAtomicall
 			Name:                    "tenant-pool-with-cluster-env-secret",
 			Provider:                "unikraft",
 			ProviderAuthSecretID:    tenantCredential.ID,
-			DefaultMachineSecretEnv: mustTestRawJSON(t, map[string]string{"OPENROUTER_API_KEY": credentialPublicID}),
+			DefaultMachineSecretEnv: mustTestRawJSON(t, map[string]string{"OPENROUTER_API_KEY": credential.ID.String()}),
 			MaxTotalMachines:        1,
 		}),
 	); !errors.Is(err, storeerr.ErrNotFound) {
 		t.Fatalf("tenant machine environment with cluster credential error = %v, want not found", err)
+	}
+	if _, err := store.Models().CreateModelProviderConfig(ctx, modelstore.CreateModelProviderConfigInput{
+		OrgID:              created.Org.ID,
+		Name:               "tenant-provider-with-cluster-header-secret",
+		APIFormat:          modelprotocol.APIFormatOpenAIResponses,
+		BaseURL:            "https://api.openai.com/v1",
+		CredentialSecretID: tenantCredential.ID,
+		SecretHeaders:      mustTestRawJSON(t, map[string]string{"X-Gateway-Key": credential.ID.String()}),
+	}); !errors.Is(err, storeerr.ErrInvalidSecretRequest) {
+		t.Fatalf("tenant provider with cluster header secret error = %v, want invalid secret request", err)
 	}
 	payload, err := store.Secrets().ReadOrgOwnedSecretPayload(ctx, secretstore.ReadOrgOwnedSecretPayloadInput{
 		OrgID:          created.Org.ID,
@@ -1000,7 +1006,7 @@ func TestConflictingProviderSupersedesDefaultProviderProvisioning(t *testing.T) 
 	defer pool.Close()
 	store := newSecretIntegrationStore(pool)
 	user := mustCreateIdentityUser(t, ctx, store, "default-model-provider-rollback@example.com", "Rollback Owner")
-	orgID, err := newSecretUUID()
+	orgID, err := uuid.NewV7()
 	if err != nil {
 		t.Fatalf("generate org id: %v", err)
 	}
@@ -1168,7 +1174,7 @@ func TestUserOrgMembershipRowReusedAcrossMembershipWrites(t *testing.T) {
 		t.Fatalf("add project membership: %v", err)
 	}
 
-	var membershipID ID
+	var membershipID uuid.UUID
 	var membershipCount int
 	var role string
 	if err := pool.QueryRow(ctx, `
@@ -1185,7 +1191,7 @@ WHERE org_id = $1 AND user_id = $2
 	if role != "admin" {
 		t.Fatalf("org membership role = %s, want admin", role)
 	}
-	var projectMembershipID ID
+	var projectMembershipID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 SELECT org_membership_id
 FROM project_memberships
@@ -1590,7 +1596,7 @@ func TestVisibleMachinesForUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create machine pool grant: %v", err)
 	}
-	var poolMachineID ID
+	var poolMachineID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 			INSERT INTO machines(
 				org_id, machine_pool_id, source_kind, display_name, provider, lifecycle_state,
@@ -1704,11 +1710,11 @@ func TestVisibleMachinesForUser(t *testing.T) {
 	}
 	assertVisibleMachineManageMatchesAuthorize(t, ctx, store, viewer.ID, viewerMachines)
 
-	fullViewerMachines := make(map[ID]executionstore.VisibleMachineRecord, len(viewerMachines))
+	fullViewerMachines := make(map[uuid.UUID]executionstore.VisibleMachineRecord, len(viewerMachines))
 	for _, machine := range viewerMachines {
 		fullViewerMachines[machine.Machine.ID] = machine
 	}
-	pagedViewerMachines := make(map[ID]bool, len(viewerMachines))
+	pagedViewerMachines := make(map[uuid.UUID]bool, len(viewerMachines))
 	afterMachine := listing.Cursor{}
 	for {
 		page, err := store.Execution().ListVisibleMachinesForPrincipal(
@@ -1754,11 +1760,11 @@ func TestVisibleMachinesForUser(t *testing.T) {
 		)
 	}
 
-	fullAdminMachines := make(map[ID]executionstore.VisibleMachineRecord, len(adminMachines))
+	fullAdminMachines := make(map[uuid.UUID]executionstore.VisibleMachineRecord, len(adminMachines))
 	for _, machine := range adminMachines {
 		fullAdminMachines[machine.Machine.ID] = machine
 	}
-	pagedAdminMachines := make(map[ID]bool, len(adminMachines))
+	pagedAdminMachines := make(map[uuid.UUID]bool, len(adminMachines))
 	afterMachine = listing.Cursor{}
 	for {
 		page, err := store.Execution().ListVisibleMachinesForPrincipal(
@@ -2019,7 +2025,7 @@ func assertVisibleMachineManageMatchesAuthorize(
 	t *testing.T,
 	ctx context.Context,
 	store *Store,
-	userID ID,
+	userID uuid.UUID,
 	records []executionstore.VisibleMachineRecord,
 ) {
 	t.Helper()
@@ -2785,7 +2791,7 @@ func TestBrowserSessionAuthenticationDoesNotWaitForTouchLock(t *testing.T) {
 		t.Fatalf("begin browser session blocker: %v", err)
 	}
 	defer func() { _ = blocker.Rollback(ctx) }()
-	var lockedID ID
+	var lockedID uuid.UUID
 	if err := blocker.QueryRow(
 		ctx,
 		`SELECT id FROM browser_sessions WHERE id = $1 FOR UPDATE`,
@@ -2958,7 +2964,7 @@ func TestAuthUsageTimestampTouchesAreThrottled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create machine pool: %v", err)
 	}
-	var machineID ID
+	var machineID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 			INSERT INTO machines(org_id, machine_pool_id, source_kind, display_name, provider, lifecycle_state,
 			    lifecycle_changed_at, cpu, memory_mb, cwd, env, secret_env, provider_options, metadata, next_reconcile_after,
@@ -3132,8 +3138,8 @@ func TestOrgInvitationAcceptDoesNotChangeExistingMembership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create third invitation: %v", err)
 	}
-	wantPendingPages := []ID{invite.ID, secondInvite.ID, thirdInvite.ID}
-	var gotPendingPages []ID
+	wantPendingPages := []uuid.UUID{invite.ID, secondInvite.ID, thirdInvite.ID}
+	var gotPendingPages []uuid.UUID
 	var afterInvitation listing.KeysetCursor
 	for {
 		page, err := store.Identity().ListPendingOrgInvitationsForUser(
@@ -3665,7 +3671,7 @@ func TestProjectMembershipSchemaEnforcesOrganizationIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add member to default org: %v", err)
 	}
-	var memberOrgMembershipID ID
+	var memberOrgMembershipID uuid.UUID
 	if err := pool.QueryRow(
 		ctx,
 		`SELECT id FROM org_memberships WHERE org_id = $1 AND user_id = $2`,
@@ -3677,7 +3683,7 @@ func TestProjectMembershipSchemaEnforcesOrganizationIsolation(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO project_memberships(org_id, project_id, org_membership_id, role, created_at)
 		VALUES ($1, $2, $3, 'viewer', $4)
-	`, testOrgID, otherProjectID, memberOrgMembershipID, now); !isForeignKeyViolation(err) {
+	`, testOrgID, otherProjectID, memberOrgMembershipID, now); !storeutil.IsForeignKeyViolation(err) {
 		t.Fatalf("cross-org project membership error = %v, want foreign key violation", err)
 	}
 
@@ -3693,7 +3699,7 @@ func TestProjectMembershipSchemaEnforcesOrganizationIsolation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add member to other org: %v", err)
 	}
-	var otherOrgMembershipID ID
+	var otherOrgMembershipID uuid.UUID
 	if err := pool.QueryRow(
 		ctx,
 		`SELECT id FROM org_memberships WHERE org_id = $1 AND user_id = $2`,
@@ -3705,7 +3711,7 @@ func TestProjectMembershipSchemaEnforcesOrganizationIsolation(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO project_memberships(org_id, project_id, org_membership_id, role, created_at)
 		VALUES ($1, $2, $3, 'viewer', $4)
-	`, testOrgID, testProjectID, otherOrgMembershipID, now); !isForeignKeyViolation(err) {
+	`, testOrgID, testProjectID, otherOrgMembershipID, now); !storeutil.IsForeignKeyViolation(err) {
 		t.Fatalf("non-member grant error = %v, want foreign key violation", err)
 	}
 
@@ -3960,7 +3966,7 @@ func TestResolveTrustedAuthIdentityCreatesVerifiedEmailOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start password signup for social-owned email: %v", err)
 	}
-	if !signup.EmailAlreadyVerified || signup.User.ID != NilID {
+	if !signup.EmailAlreadyVerified || signup.User.ID != uuid.Nil {
 		t.Fatalf("password signup for social-owned email = %+v, want already verified without new user", signup)
 	}
 }
@@ -4404,7 +4410,7 @@ func TestAuthConnectorSchemaEnforcesIdentityNamespace(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO user_auth_identities(user_id, auth_connector_id, issuer, subject, created_at)
 		VALUES ($1, $2, 'https://other-idp.example.com', 'subject', $3)
-	`, user.ID, connector.ID, now); !isForeignKeyViolation(err) {
+	`, user.ID, connector.ID, now); !storeutil.IsForeignKeyViolation(err) {
 		t.Fatalf("mismatched identity issuer error = %v, want foreign key violation", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -4458,7 +4464,7 @@ func TestDeviceAuthFlowSchemaEnforcesApprovalIntegrity(t *testing.T) {
 		    expires_at, approved_by_user_id, approved_browser_session_id, approved_at)
 		VALUES ('device-schema-wrong-session', 'device-schema-wrong-user', 'test-client', 'client', 'token', $1, $2, $3,
 		    $4, $1)
-	`, now, now.Add(time.Hour), user.ID, otherSession.ID); !isForeignKeyViolation(err) {
+	`, now, now.Add(time.Hour), user.ID, otherSession.ID); !storeutil.IsForeignKeyViolation(err) {
 		t.Fatalf("cross-user approved session error = %v, want foreign key violation", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -4810,7 +4816,7 @@ func TestDeviceAuthFlowMintsSingleUsePersonalAccessToken(t *testing.T) {
 		t.Fatalf("authenticate minted device token: %v", err)
 	}
 	if principal.Type != identitystore.PrincipalTypeUser || principal.ID != user.ID ||
-		principal.PersonalAccessTokenID == NilID {
+		principal.PersonalAccessTokenID == uuid.Nil {
 		t.Fatalf("minted token principal = %+v, want user PAT principal", principal)
 	}
 	var deviceTokenHash string
@@ -5106,7 +5112,7 @@ func TestPasswordSignupAllowsDuplicateUnverifiedAndFirstVerificationWins(t *test
 	if err != nil {
 		t.Fatalf("complete losing signup: %v", err)
 	}
-	if losing.Verified || losing.User.ID != NilID {
+	if losing.Verified || losing.User.ID != uuid.Nil {
 		t.Fatalf("losing signup should not verify or create a credential: %+v", losing)
 	}
 	user, err := authenticatePasswordForTest(
@@ -5226,7 +5232,7 @@ func TestUserAuthTokenSchemaEnforcesEmailOwnership(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO user_auth_tokens(user_id, user_email_id, purpose, token_hash, created_at, expires_at)
 		VALUES ($1, $2, 'email_verification', 'mismatched-email-token', $3, $4)
-	`, other.ID, emails[0].ID, now, now.Add(time.Hour)); !isForeignKeyViolation(err) {
+	`, other.ID, emails[0].ID, now, now.Add(time.Hour)); !storeutil.IsForeignKeyViolation(err) {
 		t.Fatalf("mismatched token email owner error = %v, want foreign key violation", err)
 	}
 	if _, err := pool.Exec(ctx, `
@@ -5399,7 +5405,7 @@ func TestPasswordSignupConcurrentVerificationFirstCommitWins(t *testing.T) {
 			continue
 		}
 		losing++
-		if result.record.User.ID != NilID {
+		if result.record.User.ID != uuid.Nil {
 			t.Fatalf("%s losing completion returned user: %+v", result.name, result.record)
 		}
 	}
@@ -5501,7 +5507,7 @@ func TestPasswordResetConsumesTokenAndRevokesSessions(t *testing.T) {
 		t.Fatalf("new reset session: %v", err)
 	}
 	if principal.ID != completed.User.ID || principal.Type != identitystore.PrincipalTypeUser ||
-		isNilID(principal.BrowserSessionID) {
+		principal.BrowserSessionID == uuid.Nil {
 		t.Fatalf("new reset principal=%+v", principal)
 	}
 	if _, err := authenticatePasswordForTest(
@@ -6671,7 +6677,7 @@ func TestMachineDaemonTokenRequiresEligibleMachineLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create machine pool: %v", err)
 	}
-	var machineID ID
+	var machineID uuid.UUID
 	if err := pool.QueryRow(ctx, `
 			INSERT INTO machines(org_id, machine_pool_id, source_kind, display_name, provider, lifecycle_state,
 			    lifecycle_changed_at, cpu, memory_mb, cwd, env, secret_env, provider_options, metadata, next_reconcile_after,
@@ -7188,7 +7194,7 @@ func TestAccountAndOrganizationDeletionLockMembershipsInStableOrder(t *testing.T
 			// Production IDs are immutable; these fixture rows have no children yet.
 			lowerID := uuid.MustParse("00000000-0000-7000-8000-000000000001")
 			higherID := uuid.MustParse("00000000-0000-7000-8000-000000000002")
-			for _, membership := range []struct{ orgID, userID, id ID }{
+			for _, membership := range []struct{ orgID, userID, id uuid.UUID }{
 				{testOrgID, member.ID, higherID},
 				{secondOrgID, secondUserID, lowerID},
 			} {
@@ -7264,7 +7270,7 @@ func TestConcurrentOwnerExitPreservesAnOrganizationOwner(t *testing.T) {
 			second := mustCreateIdentityUser(
 				t, ctx, store, "owner-exit-second-"+fmt.Sprint(accountWins)+"@example.com", "Second Owner",
 			)
-			for _, userID := range []ID{first.ID, second.ID} {
+			for _, userID := range []uuid.UUID{first.ID, second.ID} {
 				if _, err := store.Identity().AddOrgMembership(ctx, identitystore.AddOrgMembershipInput{
 					OrgID: testOrgID, UserID: userID, Role: "owner",
 				}); err != nil {
@@ -7580,7 +7586,7 @@ func authenticatePasswordForTest(
 	})
 }
 
-func assertUserRowCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID ID, want int64) {
+func assertUserRowCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, want int64) {
 	t.Helper()
 	var got int64
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE id = $1`, userID).Scan(&got); err != nil {

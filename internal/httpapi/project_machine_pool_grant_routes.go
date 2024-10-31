@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/google/uuid"
 	"github.com/omnara-ai/omnara/internal/httpapi/apierror"
 	"github.com/omnara-ai/omnara/internal/httpapi/openapi"
 	"github.com/omnara-ai/omnara/internal/publicid"
 	"github.com/omnara-ai/omnara/internal/resourcemeta"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 )
@@ -39,7 +39,7 @@ func (s strictOpenAPIServer) createProjectMachinePoolGrant(
 	request openapi.CreateProjectMachinePoolGrantRequestObject,
 	org identitystore.OrgRecord,
 	project identitystore.ProjectRecord,
-	poolID storage.ID,
+	poolID uuid.UUID,
 ) (openapi.CreateProjectMachinePoolGrantResponseObject, error) {
 	description := ""
 	if request.Body.Description != nil {
@@ -53,7 +53,7 @@ func (s strictOpenAPIServer) createProjectMachinePoolGrant(
 	if err != nil {
 		return nil, err
 	}
-	defaultMachineSecretEnvOverlay, err := rawJSONFromPointer(request.Body.DefaultMachineSecretEnvOverlay)
+	defaultMachineSecretEnvOverlay, err := secretIDsFromPointer(request.Body.DefaultMachineSecretEnvOverlay)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +241,7 @@ func (s strictOpenAPIServer) UpdateProjectMachinePoolGrant(
 	if err != nil {
 		return nil, err
 	}
-	defaultMachineSecretEnvOverlay, err := rawJSONFromPointer(request.Body.DefaultMachineSecretEnvOverlay)
+	defaultMachineSecretEnvOverlay, err := secretIDsFromPointer(request.Body.DefaultMachineSecretEnvOverlay)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +320,7 @@ func (s strictOpenAPIServer) deleteProjectMachinePoolGrant(
 	ctx context.Context,
 	org identitystore.OrgRecord,
 	project identitystore.ProjectRecord,
-	poolGrantID storage.ID,
+	poolGrantID uuid.UUID,
 ) (openapi.DeleteProjectMachinePoolGrantResponseObject, error) {
 	result, err := s.server.store.Execution().DeleteProjectMachinePoolGrant(ctx, org.ID, project.ID, poolGrantID)
 	if err != nil {
@@ -358,7 +358,7 @@ func projectMachinePoolGrantResponse(
 		return openapi.ProjectMachinePoolGrant{}, err
 	}
 	var defaultMachineSecretEnvOverlay map[string]*string
-	if err := json.Unmarshal(record.DefaultMachineSecretEnvOverlay, &defaultMachineSecretEnvOverlay); err != nil {
+	if err := publicSecretIDs(record.DefaultMachineSecretEnvOverlay, &defaultMachineSecretEnvOverlay); err != nil {
 		return openapi.ProjectMachinePoolGrant{}, err
 	}
 	defaultMachineProviderOptionsOverlay, err := jsonMapOrFallback(

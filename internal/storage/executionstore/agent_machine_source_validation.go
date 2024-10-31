@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/resourcename"
@@ -12,13 +13,13 @@ import (
 )
 
 func validateRuntimeMachineSource(index int, machine agentconfig.RuntimeMachine) error {
-	if machine.MachineID != "" && machine.MachinePoolID != "" {
+	if machine.MachineID != uuid.Nil && machine.MachinePoolID != uuid.Nil {
 		return fmt.Errorf("machine_sources[%d] cannot set both machine_id and machine_pool_id", index)
 	}
-	if machine.MachineID == "" && machine.MachinePoolID == "" {
+	if machine.MachineID == uuid.Nil && machine.MachinePoolID == uuid.Nil {
 		return fmt.Errorf("machine_sources[%d] has no machine source", index)
 	}
-	if machine.MachineID != "" {
+	if machine.MachineID != uuid.Nil {
 		if machine.MaxMachines != 0 {
 			return fmt.Errorf("machine_sources[%d].max_machines is only valid for machine_pool_id sources", index)
 		}
@@ -35,7 +36,7 @@ func validateRuntimeMachineSource(index int, machine agentconfig.RuntimeMachine)
 			)
 		}
 	}
-	if machine.MachinePoolID != "" {
+	if machine.MachinePoolID != uuid.Nil {
 		if machine.MaxMachines < 0 {
 			return fmt.Errorf("machine_sources[%d].max_machines cannot be negative", index)
 		}
@@ -52,25 +53,25 @@ func validateRuntimeMachineSource(index int, machine agentconfig.RuntimeMachine)
 func resolveMachinePoolName(
 	ctx context.Context,
 	qtx *dbsqlc.Queries,
-	orgID ID,
+	orgID uuid.UUID,
 	machinePoolName string,
-) (ID, bool, error) {
+) (uuid.UUID, bool, error) {
 	if machinePoolName == "" {
-		return NilID, false, nil
+		return uuid.Nil, false, nil
 	}
 	normalizedName, err := resourcename.CanonicalizeRequired("machine pool name", machinePoolName)
 	if err != nil {
-		return NilID, false, err
+		return uuid.Nil, false, err
 	}
 	pool, err := qtx.GetMachinePoolByName(
 		ctx,
 		dbsqlc.GetMachinePoolByNameParams{OrgID: orgID, Name: normalizedName},
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return NilID, false, nil
+		return uuid.Nil, false, nil
 	}
 	if err != nil {
-		return NilID, false, fmt.Errorf("load machine pool %q: %w", machinePoolName, err)
+		return uuid.Nil, false, fmt.Errorf("load machine pool %q: %w", machinePoolName, err)
 	}
 	return pool.ID, true, nil
 }

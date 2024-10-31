@@ -23,7 +23,6 @@ import (
 	"github.com/omnara-ai/omnara/internal/machinepool"
 	"github.com/omnara-ai/omnara/internal/model"
 	"github.com/omnara-ai/omnara/internal/publicid"
-	"github.com/omnara-ai/omnara/internal/storage"
 	"github.com/omnara-ai/omnara/internal/storage/executionstore"
 	"github.com/omnara-ai/omnara/internal/storage/identitystore"
 	"github.com/omnara-ai/omnara/internal/storage/integrationstore"
@@ -134,7 +133,7 @@ func (s strictOpenAPIServer) createAgentProfile(
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "invalid config")
 	}
 	principal, _ := principalFromContext(ctx)
-	if principal.ID == storage.NilID {
+	if principal.ID == uuid.Nil {
 		return nil, apierror.FromCode(openapi.ErrorCodeForbidden,
 			"authenticated user principal is required to create an agent profile")
 	}
@@ -185,7 +184,7 @@ func (s strictOpenAPIServer) updateAgentProfile(
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "request body is required")
 	}
 	principal, _ := principalFromContext(ctx)
-	if principal.ID == storage.NilID {
+	if principal.ID == uuid.Nil {
 		return nil, apierror.FromCode(openapi.ErrorCodeForbidden,
 			"authenticated user principal is required to update an agent profile")
 	}
@@ -243,7 +242,7 @@ func (s strictOpenAPIServer) RenameAgentProfile(
 		return nil, apierror.FromCode(openapi.ErrorCodeInvalidRequest, "name is required")
 	}
 	principal, _ := principalFromContext(ctx)
-	if principal.ID == storage.NilID {
+	if principal.ID == uuid.Nil {
 		return nil, apierror.FromCode(openapi.ErrorCodeForbidden,
 			"authenticated user principal is required to rename an agent profile")
 	}
@@ -657,8 +656,8 @@ func (s strictOpenAPIServer) listAgents(
 		filters.IncludeArchived = *params.IncludeArchived
 	}
 	extra := struct {
-		AgentProfileID   *storage.ID
-		ParentAgentID    *storage.ID
+		AgentProfileID   *uuid.UUID
+		ParentAgentID    *uuid.UUID
 		IncludeSubagents bool
 		IncludeArchived  bool
 	}{filters.AgentProfileID, filters.ParentAgentID, filters.IncludeSubagents, filters.IncludeArchived}
@@ -737,9 +736,9 @@ func (s strictOpenAPIServer) listAgentProfiles(
 	if err != nil {
 		return nil, apierror.ProjectScoped(err)
 	}
-	data := make([]openapi.AgentProfile, 0, len(page.Profiles))
+	data := make([]openapi.AgentProfileSummary, 0, len(page.Profiles))
 	for _, profile := range page.Profiles {
-		response, err := s.server.agentProfileResponseFromRecord(ctx, profile)
+		response, err := s.server.agentProfileSummaryFromRecord(ctx, profile)
 		if err != nil {
 			return nil, err
 		}
@@ -784,7 +783,7 @@ func (s strictOpenAPIServer) createAgent(
 			"authenticated account principal is required to create an agent",
 		)
 	}
-	profileID := storage.NilID
+	profileID := uuid.Nil
 	if request.Body.Profile != nil && *request.Body.Profile != "" {
 		var ok bool
 		profileID, ok = parseOpenAPIPublicID(publicid.KindAgentProfile, *request.Body.Profile)
@@ -821,7 +820,7 @@ func (s strictOpenAPIServer) createAgent(
 	}
 	s.server.startLaunchMachineProvisioning(ctx, logpkg.LoggerFromContext(ctx), result)
 	logent.Agent(ctx, result.Agent)
-	if result.AgentInput.ID != storage.NilID {
+	if result.AgentInput.ID != uuid.Nil {
 		logent.AgentInput(ctx, result.AgentInput)
 	}
 	logent.MCPConnections(ctx, result.MCPConnections)
@@ -873,7 +872,7 @@ func (s strictOpenAPIServer) updateAgentConfig(
 	if err != nil {
 		return nil, agentConfigCompileError(err)
 	}
-	expectedCurrentConfigID := storage.NilID
+	expectedCurrentConfigID := uuid.Nil
 	if request.Body.ExpectedCurrentConfigId != nil {
 		expectedCurrentConfigID, ok = parseOpenAPIPublicID(
 			publicid.KindAgentConfig,
@@ -974,7 +973,7 @@ func (s *Server) currentAgentResponse(
 		return openapi.GetAgentResponse{}, apierror.ProjectScoped(err)
 	}
 	machineIDs := make([]openapi.MachineID, 0, len(records))
-	seen := make(map[storage.ID]bool, len(records))
+	seen := make(map[uuid.UUID]bool, len(records))
 	for _, binding := range records {
 		if binding.State != executionstore.AgentMachineBindingStateAttached || seen[binding.MachineID] {
 			continue
@@ -1034,7 +1033,7 @@ func (s *Server) launchAgentResponse(
 		bindings = append(bindings, binding)
 	}
 	response.MachineBindings = bindings
-	if result.AgentInput.ID != storage.NilID {
+	if result.AgentInput.ID != uuid.Nil {
 		input, err := publicAgentInputResponseFromRecordWithContent(result.AgentInput, result.InputContentBlocks)
 		if err != nil {
 			return openapi.LaunchAgentResponse{}, err
@@ -1068,7 +1067,7 @@ func publicAgentMachineBindingResponse(
 		return openapi.AgentMachineBinding{}, err
 	}
 	var secretEnvOverlay map[string]*openapi.SecretID
-	if err := json.Unmarshal(record.SecretEnvOverlay, &secretEnvOverlay); err != nil {
+	if err := publicSecretIDs(record.SecretEnvOverlay, &secretEnvOverlay); err != nil {
 		return openapi.AgentMachineBinding{}, err
 	}
 	return openapi.AgentMachineBinding{
@@ -1076,7 +1075,6 @@ func publicAgentMachineBindingResponse(
 		ProjectId:        projectID,
 		AgentId:          agentID,
 		MachineId:        machineID,
-		MachineRef:       record.MachineRef,
 		BindingKind:      openapi.AgentMachineBindingKind(record.BindingKind),
 		State:            openapi.AgentMachineBindingState(record.State),
 		Description:      record.Description,
@@ -1088,31 +1086,84 @@ func publicAgentMachineBindingResponse(
 	}, nil
 }
 
+func (s *Server) agentConfigResponseFromRecord(
+	ctx context.Context,
+	record executionstore.AgentConfigRecord,
+) (openapi.AgentConfig, error) {
+	summary, err := s.agentConfigSummaryFromRecord(ctx, record)
+	if err != nil {
+		return openapi.AgentConfig{}, err
+	}
+	return agentConfigDetailResponse(summary, record.CompiledDefinition)
+}
+
+func agentConfigDetailResponse(
+	summary openapi.AgentConfigSummary,
+	compiled json.RawMessage,
+) (openapi.AgentConfig, error) {
+	definition, err := publicCompiledDefinition(compiled)
+	if err != nil {
+		return openapi.AgentConfig{}, err
+	}
+	return openapi.AgentConfig{
+		Id:                      summary.Id,
+		OrgId:                   summary.OrgId,
+		ProjectId:               summary.ProjectId,
+		Source:                  summary.Source,
+		SourceFormat:            (*openapi.AgentConfigSourceFormat)(summary.SourceFormat),
+		EffectiveDefinitionHash: summary.EffectiveDefinitionHash,
+		Model:                   summary.Model,
+		InstructionHash:         summary.InstructionHash,
+		CreatedAt:               summary.CreatedAt,
+		CompiledDefinition:      definition,
+	}, nil
+}
+
 func (s *Server) agentProfileResponseFromRecord(
 	ctx context.Context,
 	record executionstore.AgentProfileRecord,
 ) (openapi.AgentProfile, error) {
-	id, err := publicID(publicid.KindAgentProfile, record.ID)
+	summary, err := s.agentProfileSummaryFromRecord(ctx, record)
 	if err != nil {
 		return openapi.AgentProfile{}, err
 	}
-	orgID, err := publicID(publicid.KindOrganization, record.OrgID)
-	if err != nil {
-		return openapi.AgentProfile{}, err
-	}
-	projectID, err := publicID(publicid.KindProject, record.ProjectID)
-	if err != nil {
-		return openapi.AgentProfile{}, err
-	}
-	currentConfigID, err := publicID(publicid.KindAgentConfig, record.CurrentConfigID)
-	if err != nil {
-		return openapi.AgentProfile{}, err
-	}
-	currentConfig, err := s.agentConfigResponseFromRecord(ctx, record.CurrentConfig)
+	config, err := agentConfigDetailResponse(summary.CurrentConfig, record.CurrentConfig.CompiledDefinition)
 	if err != nil {
 		return openapi.AgentProfile{}, err
 	}
 	return openapi.AgentProfile{
+		Id: summary.Id, OrgId: summary.OrgId, ProjectId: summary.ProjectId,
+		Name: summary.Name, CurrentConfigId: summary.CurrentConfigId,
+		CurrentGeneration: summary.CurrentGeneration, CurrentConfig: config,
+		CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
+	}, nil
+}
+
+func (s *Server) agentProfileSummaryFromRecord(
+	ctx context.Context,
+	record executionstore.AgentProfileRecord,
+) (openapi.AgentProfileSummary, error) {
+	id, err := publicID(publicid.KindAgentProfile, record.ID)
+	if err != nil {
+		return openapi.AgentProfileSummary{}, err
+	}
+	orgID, err := publicID(publicid.KindOrganization, record.OrgID)
+	if err != nil {
+		return openapi.AgentProfileSummary{}, err
+	}
+	projectID, err := publicID(publicid.KindProject, record.ProjectID)
+	if err != nil {
+		return openapi.AgentProfileSummary{}, err
+	}
+	currentConfigID, err := publicID(publicid.KindAgentConfig, record.CurrentConfigID)
+	if err != nil {
+		return openapi.AgentProfileSummary{}, err
+	}
+	currentConfig, err := s.agentConfigSummaryFromRecord(ctx, record.CurrentConfig)
+	if err != nil {
+		return openapi.AgentProfileSummary{}, err
+	}
+	return openapi.AgentProfileSummary{
 		Id:                id,
 		OrgId:             orgID,
 		ProjectId:         projectID,
@@ -1125,23 +1176,23 @@ func (s *Server) agentProfileResponseFromRecord(
 	}, nil
 }
 
-func (s *Server) agentConfigResponseFromRecord(
+func (s *Server) agentConfigSummaryFromRecord(
 	ctx context.Context,
 	record executionstore.AgentConfigRecord,
-) (openapi.AgentConfig, error) {
+) (openapi.AgentConfigSummary, error) {
 	id, err := publicID(publicid.KindAgentConfig, record.ID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	orgID, err := publicID(publicid.KindOrganization, record.OrgID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	projectID, err := publicID(publicid.KindProject, record.ProjectID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
-	response := openapi.AgentConfig{
+	response := openapi.AgentConfigSummary{
 		Id:                      id,
 		OrgId:                   orgID,
 		ProjectId:               projectID,
@@ -1153,25 +1204,19 @@ func (s *Server) agentConfigResponseFromRecord(
 		response.Source = &source
 	}
 	if record.SourceFormat != "" {
-		sourceFormat := openapi.AgentConfigSourceFormat(record.SourceFormat)
+		sourceFormat := openapi.AgentConfigSummarySourceFormat(record.SourceFormat)
 		response.SourceFormat = &sourceFormat
-	}
-	if record.CompilerVersion != "" {
-		compilerVersion := record.CompilerVersion
-		response.CompilerVersion = &compilerVersion
 	}
 	contract, err := agentconfig.RuntimeContractFromCompiled(
 		record.CompiledDefinition,
-		record.CompilerVersion,
 		record.EffectiveDefinitionHash,
 	)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
-	response.Warnings = agentConfigWarnings(contract)
 	configuredModel, err := s.store.Models().GetConfiguredModelDisplay(ctx, record.OrgID, record.ConfiguredModelID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	revision, err := s.store.Models().GetConfiguredModelRevisionDisplay(
 		ctx,
@@ -1179,19 +1224,19 @@ func (s *Server) agentConfigResponseFromRecord(
 		configuredModel.CurrentRevisionID,
 	)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	effectiveModel, err := s.agentConfigEffectiveModel(ctx, record, configuredModel, revision, contract.Model)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	configuredModelID, err := publicID(publicid.KindConfiguredModel, record.ConfiguredModelID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	configuredModelRevisionID, err := publicID(publicid.KindConfiguredModelRevision, revision.ID)
 	if err != nil {
-		return openapi.AgentConfig{}, err
+		return openapi.AgentConfigSummary{}, err
 	}
 	response.Model = openapi.AgentConfigModel{
 		ProviderConfig:         revision.ProviderConfigName,

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/omnara-ai/omnara/internal/agentconfig"
 	"github.com/omnara-ai/omnara/internal/integration/slack"
@@ -51,23 +52,42 @@ type integrationToolFixture struct {
 	Agent              executionstore.AgentRecord
 	AgentConfig        executionstore.AgentConfigRecord
 	Lock               executionstore.AgentRuntimeLockRecord
-	ModelCallContextID storage.ID
-	ModelOutputEventID storage.ID
+	ModelCallContextID uuid.UUID
+	ModelOutputEventID uuid.UUID
 	Install            integrationstore.IntegrationInstallRecord
 	Target             integrationstore.IntegrationTargetRecord
 	Now                time.Time
 	WithMCP            bool
 }
 
-func toolsTestUserPrincipal(userID storage.ID) identitystore.PrincipalRecord {
+func toolsTestUserPrincipal(userID uuid.UUID) identitystore.PrincipalRecord {
 	return identitystore.PrincipalRecord{Type: identitystore.PrincipalTypeUser, ID: userID}
+}
+
+func approveToolPermissionForTest(
+	t *testing.T,
+	ctx context.Context,
+	store *executionstore.Store,
+	interaction executionstore.AgentInteractionRecord,
+	userID uuid.UUID,
+) {
+	t.Helper()
+	actor, err := executionstore.OmnaraActorParams(toolsTestOrgID, toolsTestUserPrincipal(userID))
+	require.NoError(t, err)
+	_, err = store.ResolveAgentInteraction(ctx, executionstore.ResolveAgentInteractionInput{
+		ProjectID: interaction.ProjectID, AgentID: interaction.AgentID, ID: interaction.ID, Actor: actor,
+		Resolution: interactionform.Resolution{
+			Answers: []interactionform.Answer{{OptionIndices: []int{toolpermission.AllowOptionIndex}}},
+		},
+	})
+	require.NoError(t, err)
 }
 
 func integrationToolInteraction(
 	t *testing.T,
 	ctx context.Context,
 	fixture integrationToolFixture,
-	toolCallID storage.ID,
+	toolCallID uuid.UUID,
 	kind executionstore.AgentInteractionKind,
 ) executionstore.AgentInteractionRecord {
 	t.Helper()
@@ -898,7 +918,7 @@ func TestIntegrationSendToolDisabledAndMissingTargetFailures(t *testing.T) {
 		fixture.Pool,
 		toolsTestProjectID,
 		fixture.Agent.ID,
-		storage.NilID,
+		uuid.Nil,
 	); err != nil {
 		t.Fatalf("clear target: %v", err)
 	}
@@ -1898,10 +1918,10 @@ VALUES ($1, $2, 'Tools Integration Project', $3, $4, $4)
 		toolsTestProjectID,
 		agent.ID,
 		lock,
-		[]storage.ID{input.ID},
+		[]uuid.UUID{input.ID},
 		launch.AgentConfig.ID,
 		admitted.Events[0].Sequence,
-		storage.NilID,
+		uuid.Nil,
 	)
 	return integrationToolFixture{
 		Pool:               pool,
@@ -2001,7 +2021,7 @@ func (f *integrationToolFixture) recordPendingToolCalls(
 	at time.Time,
 ) {
 	t.Helper()
-	if f.ModelOutputEventID != storage.NilID {
+	if f.ModelOutputEventID != uuid.Nil {
 		t.Fatal("integration tool fixture already published its complete tool proposal batch")
 	}
 	if len(calls) == 0 {
@@ -2051,7 +2071,7 @@ func (f *integrationToolFixture) recordPendingToolCalls(
 	f.ModelOutputEventID = modelOutputEvent.ID
 }
 
-func (f *integrationToolFixture) toolCallID(t *testing.T, ctx context.Context, providerCallID string) storage.ID {
+func (f *integrationToolFixture) toolCallID(t *testing.T, ctx context.Context, providerCallID string) uuid.UUID {
 	t.Helper()
 	record, found, err := f.Store.Execution().GetToolCallByProviderCall(
 		ctx,
@@ -2073,7 +2093,7 @@ func createIntegrationToolProfile(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	label string,
 	fixtureOptions toolFixtureOptions,
 ) executionstore.AgentProfileRecord {
@@ -2111,12 +2131,10 @@ tools:
 	compiled := compileToolsAgentYAMLResolved(t, ctx, store, userID, sourceYAML)
 	config, err := store.Execution().CreateAgentConfig(ctx, executionstore.CreateAgentConfigInput{
 		ProjectID:               toolsTestProjectID,
-		Definition:              json.RawMessage(compiled.CanonicalJSON),
 		Source:                  sourceYAML,
 		SourceFormat:            "yaml",
 		ConfiguredModelID:       parseConfiguredModelID(t, compiled),
 		CompiledDefinition:      json.RawMessage(compiled.CanonicalJSON),
-		CompilerVersion:         agentconfig.CompilerVersion,
 		EffectiveDefinitionHash: compiled.Hash,
 	})
 	if err != nil {
@@ -2138,7 +2156,7 @@ func compileToolsAgentYAMLResolved(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	sourceYAML string,
 ) agentconfig.Result {
 	t.Helper()
@@ -2157,14 +2175,14 @@ func compileToolsAgentYAMLResolved(
 		) (agentconfig.ResolvedModelSelection, error) {
 			return resolvedToolsAgentConfigModel(configuredModel), nil
 		},
-		ResolveMachineName: func(machineName string) (string, error) {
+		ResolveMachineName: func(machineName string) (uuid.UUID, error) {
 			machineID, err := store.Execution().ResolveAgentConfigMachineName(ctx, toolsTestProjectID, machineName)
 			if err != nil {
-				return "", err
+				return uuid.Nil, err
 			}
-			return publicid.Encode(publicid.KindMachine, machineID)
+			return machineID, nil
 		},
-		ResolveMachinePoolName: func(machinePoolName string) (string, error) {
+		ResolveMachinePoolName: func(machinePoolName string) (uuid.UUID, error) {
 			machinePoolID, err := store.Execution().ResolveAgentConfigMachinePoolName(
 				ctx,
 				toolsTestOrgID,
@@ -2172,9 +2190,9 @@ func compileToolsAgentYAMLResolved(
 				machinePoolName,
 			)
 			if err != nil {
-				return "", err
+				return uuid.Nil, err
 			}
-			return publicid.Encode(publicid.KindMachinePool, machinePoolID)
+			return machinePoolID, nil
 		},
 		ResolveSkillID: func(skillID string) (agentconfig.SkillResolution, error) {
 			records, _, err := store.Skills().GetSkillsByIDsForCompile(ctx, skillstore.GetSkillsByIDsInput{
@@ -2189,8 +2207,8 @@ func compileToolsAgentYAMLResolved(
 				return agentconfig.SkillResolution{}, storeerr.ErrNotFound
 			}
 			return agentconfig.SkillResolution{
-				PublicID: skillID,
-				Name:     records[0].Name,
+				ID:   uuid.Must(publicid.Decode(publicid.KindSkill, skillID)),
+				Name: records[0].Name,
 			}, nil
 		},
 	})
@@ -2205,25 +2223,21 @@ func resolvedToolsAgentConfigModel(
 ) agentconfig.ResolvedModelSelection {
 	supportsTools := configuredModel.SupportsTools
 	return agentconfig.ResolvedModelSelection{
-		ConfiguredModelID: configuredModel.ID.String(),
+		ConfiguredModelID: configuredModel.ID,
 		SupportsTools:     &supportsTools,
 	}
 }
 
-func parseConfiguredModelID(t *testing.T, compiled agentconfig.Result) storage.ID {
+func parseConfiguredModelID(t *testing.T, compiled agentconfig.Result) uuid.UUID {
 	t.Helper()
-	id, err := storage.ParseID(compiled.Compiled.Model.ConfiguredModelID)
-	if err != nil {
-		t.Fatalf("parse compiled configured model id: %v", err)
-	}
-	return id
+	return compiled.Compiled.Model.ConfiguredModelID
 }
 
 func createIntegrationToolInstall(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	agentProfileID, userID storage.ID,
+	agentProfileID, userID uuid.UUID,
 	label string,
 	now time.Time,
 ) integrationstore.IntegrationInstallRecord {
@@ -2247,10 +2261,10 @@ func createIntegrationToolSecrets(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	label string,
 	now time.Time,
-) storage.ID {
+) uuid.UUID {
 	t.Helper()
 	secret, _, err := store.Secrets().CreateSecret(
 		ctx,
@@ -2275,8 +2289,8 @@ func createIntegrationToolSecrets(
 }
 
 func integrationToolInstallInput(
-	agentProfileID, userID storage.ID,
-	credentialSecretID storage.ID,
+	agentProfileID, userID uuid.UUID,
+	credentialSecretID uuid.UUID,
 	now time.Time,
 ) integrationstore.UpsertIntegrationInstallInput {
 	return integrationstore.UpsertIntegrationInstallInput{
@@ -2385,7 +2399,7 @@ func ensureIntegrationToolsProjectAdmin(
 	t *testing.T,
 	ctx context.Context,
 	store *storage.Store,
-	userID storage.ID,
+	userID uuid.UUID,
 	now time.Time,
 ) {
 	t.Helper()
