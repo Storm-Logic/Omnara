@@ -1,6 +1,8 @@
 package openapispec
 
 import _ "embed"
+import _ "embed"
+import _ "embed"
 
 // YAML is the checked-in public OpenAPI contract.
 //
