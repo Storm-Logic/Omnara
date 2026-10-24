@@ -12,7 +12,7 @@ interact with each agent.
 [Changelog](https://docs.omnara.com/changelog) ·
 [Discord](https://discord.gg/Dc46sYk6e3)
 
-## Who it is for
+## Who it is for__________________
 
 - **Developers.** Build agents for internal use or customer-facing products with
   the API. Your application controls who can use each agent, what input it
